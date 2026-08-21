@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.1";
+const APP_VERSION: &str = "0.2.2";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -762,55 +762,35 @@ impl eframe::App for HandApp {
                 ScrollArea::vertical()
                     .auto_shrink([false, false])
                     .show(icons_ui, |ui| {
-                        egui::Grid::new("icon_favorites_grid_modern")
-                            .num_columns(5)
-                            .spacing([8.0, 8.0])
-                            .show(ui, |ui| {
-                                for index in 0..self.icon_favorites.len() {
-                                    let favorite = self.icon_favorites[index].clone();
-                                    let path = favorite.path;
-                                    let label = favorite.label;
-                                    self.cache_icon(ctx, &path);
-                                    let response = ui
-                                        .vertical(|ui| {
-                                            let response = match self
-                                                .icon_textures
-                                                .get(&path)
-                                                .and_then(|icon| icon.as_ref())
-                                            {
-                                                Some(icon) => ui.add(
-                                                    egui::ImageButton::new((
-                                                        icon.id(),
-                                                        egui::vec2(40.0, 40.0),
-                                                    ))
-                                                    .selected(
-                                                        self.selected_icon_favorite == Some(index),
-                                                    ),
-                                                ),
-                                                None => ui.add_sized(
-                                                    [40.0, 40.0],
-                                                    egui::Button::new("?").selected(
-                                                        self.selected_icon_favorite == Some(index),
-                                                    ),
-                                                ),
-                                            };
-                                            ui.label(label);
-                                            response
-                                        })
-                                        .inner
-                                        .on_hover_text(&path);
-                                    if response.clicked() {
-                                        self.select_icon_favorite(index);
-                                    }
-                                    if response.double_clicked() {
-                                        self.select_icon_favorite(index);
-                                        self.open_selected_icon_favorite();
-                                    }
-                                    if (index + 1) % 5 == 0 {
-                                        ui.end_row();
-                                    }
-                                }
+                        for index in 0..self.icon_favorites.len() {
+                            let favorite = self.icon_favorites[index].clone();
+                            self.cache_icon(ctx, &favorite.path);
+                            let row = ui.horizontal(|ui| {
+                                let _ = match self
+                                    .icon_textures
+                                    .get(&favorite.path)
+                                    .and_then(|icon| icon.as_ref())
+                                {
+                                    Some(icon) => ui.image((icon.id(), egui::vec2(20.0, 20.0))),
+                                    None => ui.add_sized([20.0, 20.0], egui::Label::new("?")),
+                                };
+                                ui.label(&favorite.label);
                             });
+                            let response = ui
+                                .interact(
+                                    row.response.rect,
+                                    ui.id().with(("icon_favorite", index)),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_text(&favorite.path);
+                            if response.clicked() {
+                                self.select_icon_favorite(index);
+                            }
+                            if response.double_clicked() {
+                                self.select_icon_favorite(index);
+                                self.open_selected_icon_favorite();
+                            }
+                        }
                     });
             });
         });
@@ -1004,8 +984,7 @@ impl eframe::App for HandApp {
 
 fn default_icon_label(path: &str) -> String {
     Path::new(path)
-        .file_stem()
-        .or_else(|| Path::new(path).file_name())
+        .file_name()
         .and_then(|name| name.to_str())
         .filter(|name| !name.is_empty())
         .unwrap_or(path)
