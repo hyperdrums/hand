@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.17";
+const APP_VERSION: &str = "0.2.18";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -878,8 +878,8 @@ impl eframe::App for HandApp {
                             let button = egui::Button::new(path)
                                 .min_size(egui::vec2(ui.available_width(), 24.0));
                             let button = if is_search_highlight {
-                                button.fill(Color32::from_rgb(225, 242, 255)).stroke(
-                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(65, 145, 220)),
+                                button.fill(Color32::from_rgb(80, 165, 235)).stroke(
+                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(20, 90, 160)),
                                 )
                             } else {
                                 button.selected(self.selected_favorite == Some(index))
@@ -974,8 +974,8 @@ impl eframe::App for HandApp {
                                 && self.search_pane == SearchPane::Launcher
                                 && self.selected_launcher_file == Some(index);
                             let button = if is_search_highlight {
-                                button.fill(Color32::from_rgb(225, 242, 255)).stroke(
-                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(65, 145, 220)),
+                                button.fill(Color32::from_rgb(80, 165, 235)).stroke(
+                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(20, 90, 160)),
                                 )
                             } else {
                                 button.selected(self.selected_launcher_file == Some(index))
