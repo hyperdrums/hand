@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.3";
+const APP_VERSION: &str = "0.2.4";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -1095,6 +1095,18 @@ fn configure_japanese_font(ctx: &egui::Context) {
     ctx.set_fonts(fonts);
 }
 
+fn app_icon() -> egui::IconData {
+    let image = image::load_from_memory(include_bytes!("../assets/hand-icon.png"))
+        .expect("embedded app icon must be readable")
+        .to_rgba8();
+    let (width, height) = image.dimensions();
+    egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    }
+}
+
 fn clipboard_files() -> Vec<String> {
     unsafe {
         if IsClipboardFormatAvailable(CF_HDROP) == 0 || OpenClipboard(std::ptr::null_mut()) == 0 {
@@ -1123,7 +1135,8 @@ fn main() -> eframe::Result<()> {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 760.0])
-            .with_min_inner_size([980.0, 700.0]),
+            .with_min_inner_size([980.0, 700.0])
+            .with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native(
