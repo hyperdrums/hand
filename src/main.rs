@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.4";
+const APP_VERSION: &str = "0.2.5";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -558,8 +558,7 @@ impl eframe::App for HandApp {
                                 .hint_text("表示名"),
                         );
                     }
-                    if response.lost_focus()
-                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
                     {
                         self.register_favorite();
                     }
@@ -567,10 +566,15 @@ impl eframe::App for HandApp {
                         self.register_favorite();
                     }
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.add_sized(
+                        let search_response = ui.add_sized(
                             [240.0, 28.0],
                             egui::TextEdit::singleline(&mut self.search_query).hint_text("検索"),
                         );
+                        if search_response.has_focus()
+                            && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                        {
+                            search_response.request_focus();
+                        }
                     });
                 });
             });
