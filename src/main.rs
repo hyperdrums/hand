@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.13";
+const APP_VERSION: &str = "0.2.14";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -55,6 +55,12 @@ enum RegistrationKind {
     Path,
     Icon,
     LauncherDir,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SearchPane {
+    Favorites,
+    Launcher,
 }
 
 #[derive(Deserialize)]
@@ -94,8 +100,10 @@ struct HandApp {
     registration_kind: RegistrationKind,
     selected_history: Option<usize>,
     selected_favorite: Option<usize>,
+    selected_launcher_file: Option<usize>,
     selected_icon_favorite: Option<usize>,
     selected_launcher_dir: Option<usize>,
+    search_pane: SearchPane,
     icon_textures: HashMap<String, Option<egui::TextureHandle>>,
     #[cfg(feature = "log-ui")]
     logs: VecDeque<(bool, String)>,
@@ -122,8 +130,10 @@ impl HandApp {
             registration_kind: RegistrationKind::Path,
             selected_history: None,
             selected_favorite: None,
+            selected_launcher_file: None,
             selected_icon_favorite: None,
             selected_launcher_dir: None,
+            search_pane: SearchPane::Favorites,
             icon_textures: HashMap::new(),
             #[cfg(feature = "log-ui")]
             logs: VecDeque::new(),
@@ -152,6 +162,108 @@ impl HandApp {
     fn matches_search(&self, value: &str) -> bool {
         let query = self.search_query.trim();
         query.is_empty() || value.to_lowercase().contains(&query.to_lowercase())
+    }
+
+    fn matching_favorite_indices(&self) -> Vec<usize> {
+        self.favorites
+            .iter()
+            .enumerate()
+            .filter_map(|(index, path)| self.matches_search(path).then_some(index))
+            .collect()
+    }
+
+    fn matching_launcher_indices(&self) -> Vec<usize> {
+        self.launcher_files
+            .iter()
+            .enumerate()
+            .filter_map(|(index, file)| {
+                (self.matches_search(&file.label) || self.matches_search(&file.path))
+                    .then_some(index)
+            })
+            .collect()
+    }
+
+    fn select_search_result(&mut self, pane: SearchPane, index: Option<usize>) {
+        self.search_pane = pane;
+        match pane {
+            SearchPane::Favorites => {
+                self.selected_favorite = index;
+                self.selected_launcher_file = None;
+            }
+            SearchPane::Launcher => {
+                self.selected_favorite = None;
+                self.selected_launcher_file = index;
+            }
+        }
+    }
+
+    fn move_search_selection(&mut self, step: isize) -> bool {
+        let matches = match self.search_pane {
+            SearchPane::Favorites => self.matching_favorite_indices(),
+            SearchPane::Launcher => self.matching_launcher_indices(),
+        };
+        if matches.is_empty() {
+            self.select_search_result(self.search_pane, None);
+            return false;
+        }
+
+        let selected = match self.search_pane {
+            SearchPane::Favorites => self.selected_favorite,
+            SearchPane::Launcher => self.selected_launcher_file,
+        };
+        let next = selected
+            .and_then(|index| matches.iter().position(|candidate| *candidate == index))
+            .map(|position| {
+                let len = matches.len() as isize;
+                matches[(position as isize + step).rem_euclid(len) as usize]
+            })
+            .unwrap_or_else(|| {
+                if step < 0 {
+                    *matches.last().unwrap()
+                } else {
+                    matches[0]
+                }
+            });
+        self.select_search_result(self.search_pane, Some(next));
+        true
+    }
+
+    fn switch_search_pane(&mut self, pane: SearchPane) -> bool {
+        let matches = match pane {
+            SearchPane::Favorites => self.matching_favorite_indices(),
+            SearchPane::Launcher => self.matching_launcher_indices(),
+        };
+        let selected = match pane {
+            SearchPane::Favorites => self.selected_favorite,
+            SearchPane::Launcher => self.selected_launcher_file,
+        };
+        let index = selected
+            .filter(|index| matches.contains(index))
+            .or_else(|| matches.first().copied());
+        self.select_search_result(pane, index);
+        index.is_some()
+    }
+
+    fn open_search_selection(&mut self) {
+        let has_selection = match self.search_pane {
+            SearchPane::Favorites => self
+                .selected_favorite
+                .is_some_and(|index| self.matching_favorite_indices().contains(&index)),
+            SearchPane::Launcher => self
+                .selected_launcher_file
+                .is_some_and(|index| self.matching_launcher_indices().contains(&index)),
+        };
+        if !has_selection && !self.switch_search_pane(self.search_pane) {
+            return;
+        }
+        match self.search_pane {
+            SearchPane::Favorites => self.open_selected_favorite(),
+            SearchPane::Launcher => {
+                if let Some(index) = self.selected_launcher_file {
+                    self.open_launcher_file(index);
+                }
+            }
+        }
     }
 
     fn poll_clipboard(&mut self) {
@@ -505,8 +617,46 @@ impl eframe::App for HandApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_clipboard();
         ctx.request_repaint_after(POLL_INTERVAL);
+        let search_id = egui::Id::new("global_search");
         let focus_search =
             ctx.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::F));
+        let search_has_focus = focus_search || ctx.memory(|memory| memory.has_focus(search_id));
+        let mut scroll_to_favorite = false;
+        let mut scroll_to_launcher = false;
+
+        if search_has_focus {
+            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+                self.search_query.clear();
+                self.selected_favorite = None;
+                self.selected_launcher_file = None;
+            } else if ctx
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
+            {
+                if self.move_search_selection(1) {
+                    scroll_to_favorite = self.search_pane == SearchPane::Favorites;
+                    scroll_to_launcher = self.search_pane == SearchPane::Launcher;
+                }
+            } else if ctx
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
+            {
+                if self.move_search_selection(-1) {
+                    scroll_to_favorite = self.search_pane == SearchPane::Favorites;
+                    scroll_to_launcher = self.search_pane == SearchPane::Launcher;
+                }
+            } else if ctx
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
+            {
+                scroll_to_favorite = self.switch_search_pane(SearchPane::Favorites);
+            } else if ctx
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
+            {
+                scroll_to_launcher = self.switch_search_pane(SearchPane::Launcher);
+            } else if ctx
+                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
+            {
+                self.open_search_selection();
+            }
+        }
 
         egui::TopBottomPanel::top("toolbar")
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 10)))
@@ -563,15 +713,11 @@ impl eframe::App for HandApp {
                         let search_response = ui.add_sized(
                             [240.0, 28.0],
                             egui::TextEdit::singleline(&mut self.search_query)
+                                .id(search_id)
                                 .hint_text("検索")
                                 .return_key(None),
                         );
                         if focus_search {
-                            search_response.request_focus();
-                        }
-                        if search_response.has_focus()
-                            && ui.input(|input| input.key_pressed(egui::Key::Enter))
-                        {
                             search_response.request_focus();
                         }
                     });
@@ -690,10 +836,15 @@ impl eframe::App for HandApp {
                             );
                             if response.clicked() {
                                 self.selected_favorite = Some(index);
+                                self.selected_launcher_file = None;
+                                self.search_pane = SearchPane::Favorites;
                             }
                             if response.double_clicked() {
                                 self.selected_favorite = Some(index);
                                 self.open_selected_favorite();
+                            }
+                            if scroll_to_favorite && self.selected_favorite == Some(index) {
+                                response.scroll_to_me(Some(egui::Align::Center));
                             }
                         }
                     });
@@ -768,10 +919,22 @@ impl eframe::App for HandApp {
                                 None => egui::Button::new(format!("?  {}", file.label)),
                             };
                             let response = ui
-                                .add_sized([ui.available_width(), 24.0], button)
+                                .add_sized(
+                                    [ui.available_width(), 24.0],
+                                    button.selected(self.selected_launcher_file == Some(index)),
+                                )
                                 .on_hover_text(&file.path);
+                            if response.clicked() {
+                                self.selected_launcher_file = Some(index);
+                                self.selected_favorite = None;
+                                self.search_pane = SearchPane::Launcher;
+                            }
                             if response.double_clicked() {
+                                self.selected_launcher_file = Some(index);
                                 self.open_launcher_file(index);
+                            }
+                            if scroll_to_launcher && self.selected_launcher_file == Some(index) {
+                                response.scroll_to_me(Some(egui::Align::Center));
                             }
                         }
                     });
