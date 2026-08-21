@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.8";
+const APP_VERSION: &str = "0.2.9";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -403,6 +403,7 @@ impl HandApp {
         }
 
         collect_launcher_files(Path::new(&directory), &mut self.launcher_files);
+        add_duplicate_parent_labels(&mut self.launcher_files);
         self.launcher_files
             .sort_by_cached_key(|file| file.label.to_lowercase());
     }
@@ -744,24 +745,38 @@ impl eframe::App for HandApp {
                                 continue;
                             }
                             self.cache_icon(ctx, &file.path);
-                            let row = ui.horizontal(|ui| {
-                                let _ = match self
-                                    .icon_textures
-                                    .get(&file.path)
-                                    .and_then(|icon| icon.as_ref())
-                                {
-                                    Some(icon) => ui.image((icon.id(), egui::vec2(20.0, 20.0))),
-                                    None => ui.add_sized([20.0, 20.0], egui::Label::new("?")),
-                                };
-                                ui.label(&file.label);
-                            });
-                            let response = ui
-                                .interact(
-                                    row.response.rect,
-                                    ui.id().with(("launcher_file", index)),
-                                    egui::Sense::click(),
-                                )
-                                .on_hover_text(&file.path);
+                            let (rect, response) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), 24.0),
+                                egui::Sense::click(),
+                            );
+                            if response.hovered() {
+                                ui.painter().rect_filled(
+                                    rect,
+                                    3.0,
+                                    ui.visuals().widgets.hovered.bg_fill,
+                                );
+                            }
+                            ui.allocate_new_ui(
+                                egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(4.0, 2.0))),
+                                |row_ui| {
+                                    row_ui.horizontal(|ui| {
+                                        let _ = match self
+                                            .icon_textures
+                                            .get(&file.path)
+                                            .and_then(|icon| icon.as_ref())
+                                        {
+                                            Some(icon) => {
+                                                ui.image((icon.id(), egui::vec2(20.0, 20.0)))
+                                            }
+                                            None => {
+                                                ui.add_sized([20.0, 20.0], egui::Label::new("?"))
+                                            }
+                                        };
+                                        ui.label(&file.label);
+                                    });
+                                },
+                            );
+                            let response = response.on_hover_text(&file.path);
                             if response.double_clicked() {
                                 self.open_launcher_file(index);
                             }
@@ -801,24 +816,41 @@ impl eframe::App for HandApp {
                                 continue;
                             }
                             self.cache_icon(ctx, &favorite.path);
-                            let row = ui.horizontal(|ui| {
-                                let _ = match self
-                                    .icon_textures
-                                    .get(&favorite.path)
-                                    .and_then(|icon| icon.as_ref())
-                                {
-                                    Some(icon) => ui.image((icon.id(), egui::vec2(20.0, 20.0))),
-                                    None => ui.add_sized([20.0, 20.0], egui::Label::new("?")),
-                                };
-                                ui.label(&favorite.label);
-                            });
-                            let response = ui
-                                .interact(
-                                    row.response.rect,
-                                    ui.id().with(("icon_favorite", index)),
-                                    egui::Sense::click(),
-                                )
-                                .on_hover_text(&favorite.path);
+                            let (rect, response) = ui.allocate_exact_size(
+                                egui::vec2(ui.available_width(), 24.0),
+                                egui::Sense::click(),
+                            );
+                            let fill = if self.selected_icon_favorite == Some(index) {
+                                ui.visuals().selection.bg_fill
+                            } else if response.hovered() {
+                                ui.visuals().widgets.hovered.bg_fill
+                            } else {
+                                Color32::TRANSPARENT
+                            };
+                            if fill != Color32::TRANSPARENT {
+                                ui.painter().rect_filled(rect, 3.0, fill);
+                            }
+                            ui.allocate_new_ui(
+                                egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(4.0, 2.0))),
+                                |row_ui| {
+                                    row_ui.horizontal(|ui| {
+                                        let _ = match self
+                                            .icon_textures
+                                            .get(&favorite.path)
+                                            .and_then(|icon| icon.as_ref())
+                                        {
+                                            Some(icon) => {
+                                                ui.image((icon.id(), egui::vec2(20.0, 20.0)))
+                                            }
+                                            None => {
+                                                ui.add_sized([20.0, 20.0], egui::Label::new("?"))
+                                            }
+                                        };
+                                        ui.label(&favorite.label);
+                                    });
+                                },
+                            );
+                            let response = response.on_hover_text(&favorite.path);
                             if response.clicked() {
                                 self.select_icon_favorite(index);
                             }
@@ -1015,6 +1047,24 @@ impl eframe::App for HandApp {
                 });
             }
         });
+    }
+}
+
+fn add_duplicate_parent_labels(files: &mut [LauncherFile]) {
+    let mut label_counts = HashMap::new();
+    for file in files.iter() {
+        *label_counts.entry(file.label.clone()).or_insert(0_usize) += 1;
+    }
+    for file in files.iter_mut() {
+        if label_counts.get(&file.label).copied().unwrap_or_default() < 2 {
+            continue;
+        }
+        let parent = Path::new(&file.path)
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|name| name.to_str())
+            .unwrap_or("…");
+        file.label = format!("{} ({parent})", file.label);
     }
 }
 
