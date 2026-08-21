@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.19";
+const APP_VERSION: &str = "0.2.20";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -744,7 +744,7 @@ impl eframe::App for HandApp {
                             [240.0, 28.0],
                             egui::TextEdit::singleline(&mut self.search_query)
                                 .id(search_id)
-                                .hint_text("検索")
+                                .hint_text("検索(Ctrl+F)")
                                 .return_key(None),
                         );
                         if focus_search {
