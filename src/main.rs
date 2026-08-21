@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.7";
+const APP_VERSION: &str = "0.2.8";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -391,27 +391,18 @@ impl HandApp {
         let Some(index) = self.selected_launcher_dir else {
             return;
         };
-        let Some(directory) = self.launcher_dirs.get(index) else {
+        let Some(directory) = self.launcher_dirs.get(index).cloned() else {
             return;
         };
-        let Ok(entries) = fs::read_dir(directory) else {
+        if fs::read_dir(&directory).is_err() {
             self.log(
                 format!("ランチャーDIRを読み込めませんでした: {directory}"),
                 true,
             );
             return;
-        };
+        }
 
-        self.launcher_files = entries
-            .filter_map(Result::ok)
-            .filter_map(|entry| {
-                let path = entry.path();
-                path.is_file().then(|| LauncherFile {
-                    label: default_icon_label(&path.to_string_lossy()),
-                    path: path.to_string_lossy().into_owned(),
-                })
-            })
-            .collect();
+        collect_launcher_files(Path::new(&directory), &mut self.launcher_files);
         self.launcher_files
             .sort_by_cached_key(|file| file.label.to_lowercase());
     }
@@ -1024,6 +1015,32 @@ impl eframe::App for HandApp {
                 });
             }
         });
+    }
+}
+
+fn collect_launcher_files(directory: &Path, files: &mut Vec<LauncherFile>) {
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+
+    for entry in entries.flatten() {
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        // シンボリックリンクやジャンクションは循環参照を避けるため追跡しない。
+        if file_type.is_symlink() {
+            continue;
+        }
+
+        let path = entry.path();
+        if file_type.is_dir() {
+            collect_launcher_files(&path, files);
+        } else if file_type.is_file() {
+            files.push(LauncherFile {
+                label: default_icon_label(&path.to_string_lossy()),
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
     }
 }
 
