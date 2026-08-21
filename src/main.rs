@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.0";
+const APP_VERSION: &str = "0.2.1";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -263,6 +263,18 @@ impl HandApp {
             Ok(()) => self.log("履歴をコピーしました", false),
             Err(error) => self.log(format!("コピーに失敗しました: {error}"), true),
         }
+    }
+
+    fn remove_selected_history(&mut self) {
+        let Some(index) = self.selected_history else {
+            return;
+        };
+        if index >= self.history.len() {
+            return;
+        }
+        self.history.remove(index);
+        self.selected_history =
+            (!self.history.is_empty()).then(|| index.min(self.history.len() - 1));
     }
 
     fn open_selected_history(&mut self) {
@@ -513,7 +525,7 @@ impl eframe::App for HandApp {
                         .selected_text(match self.registration_kind {
                             RegistrationKind::Path => "パス",
                             RegistrationKind::Icon => "アイコン",
-                            RegistrationKind::LauncherDir => "ランチャーDIR",
+                            RegistrationKind::LauncherDir => "ディレクトリ",
                         })
                         .show_ui(ui, |ui| {
                             ui.selectable_value(
@@ -529,7 +541,7 @@ impl eframe::App for HandApp {
                             ui.selectable_value(
                                 &mut self.registration_kind,
                                 RegistrationKind::LauncherDir,
-                                "ランチャーDIR",
+                                "ディレクトリ",
                             );
                         });
                     if self.registration_kind == RegistrationKind::Icon {
@@ -612,6 +624,9 @@ impl eframe::App for HandApp {
                             }
                         }
                     });
+                if ui.input(|input| input.key_pressed(egui::Key::Delete)) {
+                    self.remove_selected_history();
+                }
             });
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -695,42 +710,31 @@ impl eframe::App for HandApp {
                 ScrollArea::vertical()
                     .max_height(launcher_height)
                     .show(icons_ui, |ui| {
-                        egui::Grid::new("directory_launcher_grid")
-                            .num_columns(5)
-                            .spacing([8.0, 8.0])
-                            .show(ui, |ui| {
-                                for index in 0..self.launcher_files.len() {
-                                    let file = self.launcher_files[index].clone();
-                                    self.cache_icon(ctx, &file.path);
-                                    let response = ui
-                                        .vertical(|ui| {
-                                            let response = match self
-                                                .icon_textures
-                                                .get(&file.path)
-                                                .and_then(|icon| icon.as_ref())
-                                            {
-                                                Some(icon) => ui.add(egui::ImageButton::new((
-                                                    icon.id(),
-                                                    egui::vec2(40.0, 40.0),
-                                                ))),
-                                                None => ui.add_sized(
-                                                    [40.0, 40.0],
-                                                    egui::Button::new("?"),
-                                                ),
-                                            };
-                                            ui.label(file.label);
-                                            response
-                                        })
-                                        .inner
-                                        .on_hover_text(&file.path);
-                                    if response.double_clicked() {
-                                        self.open_launcher_file(index);
-                                    }
-                                    if (index + 1) % 5 == 0 {
-                                        ui.end_row();
-                                    }
-                                }
+                        for index in 0..self.launcher_files.len() {
+                            let file = self.launcher_files[index].clone();
+                            self.cache_icon(ctx, &file.path);
+                            let row = ui.horizontal(|ui| {
+                                let _ = match self
+                                    .icon_textures
+                                    .get(&file.path)
+                                    .and_then(|icon| icon.as_ref())
+                                {
+                                    Some(icon) => ui.image((icon.id(), egui::vec2(20.0, 20.0))),
+                                    None => ui.add_sized([20.0, 20.0], egui::Label::new("?")),
+                                };
+                                ui.label(&file.label);
                             });
+                            let response = ui
+                                .interact(
+                                    row.response.rect,
+                                    ui.id().with(("launcher_file", index)),
+                                    egui::Sense::click(),
+                                )
+                                .on_hover_text(&file.path);
+                            if response.double_clicked() {
+                                self.open_launcher_file(index);
+                            }
+                        }
                     });
                 icons_ui.separator();
                 icons_ui.horizontal(|ui| {
