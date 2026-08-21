@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.16";
+const APP_VERSION: &str = "0.2.17";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -104,6 +104,7 @@ struct HandApp {
     selected_icon_favorite: Option<usize>,
     selected_launcher_dir: Option<usize>,
     search_pane: SearchPane,
+    search_result_highlight: bool,
     icon_textures: HashMap<String, Option<egui::TextureHandle>>,
     #[cfg(feature = "log-ui")]
     logs: VecDeque<(bool, String)>,
@@ -134,6 +135,7 @@ impl HandApp {
             selected_icon_favorite: None,
             selected_launcher_dir: None,
             search_pane: SearchPane::Favorites,
+            search_result_highlight: false,
             icon_textures: HashMap::new(),
             #[cfg(feature = "log-ui")]
             logs: VecDeque::new(),
@@ -185,6 +187,7 @@ impl HandApp {
 
     fn select_search_result(&mut self, pane: SearchPane, index: Option<usize>) {
         self.search_pane = pane;
+        self.search_result_highlight = !self.search_query.trim().is_empty();
         match pane {
             SearchPane::Favorites => {
                 self.selected_favorite = index;
@@ -643,6 +646,7 @@ impl eframe::App for HandApp {
                 self.search_query.clear();
                 self.selected_favorite = None;
                 self.selected_launcher_file = None;
+                self.search_result_highlight = false;
             } else if ctx
                 .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
             {
@@ -751,11 +755,15 @@ impl eframe::App for HandApp {
                 });
             });
 
-        if search_changed && !self.search_query.trim().is_empty() {
-            match self.select_initial_search_result() {
-                Some(SearchPane::Favorites) => scroll_to_favorite = true,
-                Some(SearchPane::Launcher) => scroll_to_launcher = true,
-                None => {}
+        if search_changed {
+            if self.search_query.trim().is_empty() {
+                self.search_result_highlight = false;
+            } else {
+                match self.select_initial_search_result() {
+                    Some(SearchPane::Favorites) => scroll_to_favorite = true,
+                    Some(SearchPane::Launcher) => scroll_to_launcher = true,
+                    None => {}
+                }
             }
         }
 
@@ -864,15 +872,24 @@ impl eframe::App for HandApp {
                             if !self.matches_search(path) {
                                 continue;
                             }
-                            let response = ui.add(
-                                egui::Button::new(path)
-                                    .min_size(egui::vec2(ui.available_width(), 24.0))
-                                    .selected(self.selected_favorite == Some(index)),
-                            );
+                            let is_search_highlight = self.search_result_highlight
+                                && self.search_pane == SearchPane::Favorites
+                                && self.selected_favorite == Some(index);
+                            let button = egui::Button::new(path)
+                                .min_size(egui::vec2(ui.available_width(), 24.0));
+                            let button = if is_search_highlight {
+                                button.fill(Color32::from_rgb(225, 242, 255)).stroke(
+                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(65, 145, 220)),
+                                )
+                            } else {
+                                button.selected(self.selected_favorite == Some(index))
+                            };
+                            let response = ui.add(button);
                             if response.clicked() {
                                 self.selected_favorite = Some(index);
                                 self.selected_launcher_file = None;
                                 self.search_pane = SearchPane::Favorites;
+                                self.search_result_highlight = false;
                             }
                             if response.double_clicked() {
                                 self.selected_favorite = Some(index);
@@ -953,16 +970,24 @@ impl eframe::App for HandApp {
                                 ),
                                 None => egui::Button::new(format!("?  {}", file.label)),
                             };
-                            let response = ui
-                                .add_sized(
-                                    [ui.available_width(), 24.0],
-                                    button.selected(self.selected_launcher_file == Some(index)),
+                            let is_search_highlight = self.search_result_highlight
+                                && self.search_pane == SearchPane::Launcher
+                                && self.selected_launcher_file == Some(index);
+                            let button = if is_search_highlight {
+                                button.fill(Color32::from_rgb(225, 242, 255)).stroke(
+                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(65, 145, 220)),
                                 )
+                            } else {
+                                button.selected(self.selected_launcher_file == Some(index))
+                            };
+                            let response = ui
+                                .add_sized([ui.available_width(), 24.0], button)
                                 .on_hover_text(&file.path);
                             if response.clicked() {
                                 self.selected_launcher_file = Some(index);
                                 self.selected_favorite = None;
                                 self.search_pane = SearchPane::Launcher;
+                                self.search_result_highlight = false;
                             }
                             if response.double_clicked() {
                                 self.selected_launcher_file = Some(index);
