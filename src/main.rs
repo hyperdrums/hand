@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.6";
+const APP_VERSION: &str = "0.2.7";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -653,7 +653,18 @@ impl eframe::App for HandApp {
 
         egui::CentralPanel::default().show(ctx, |ui| {
             ui.visuals_mut().override_text_color = Some(Color32::BLACK);
+            let panel_rect = ui.max_rect();
+            let divider_color = Color32::from_gray(180);
             ui.columns(2, |columns| {
+                let divider_x =
+                    (columns[0].max_rect().right() + columns[1].max_rect().left()) / 2.0;
+                columns[0].painter().line_segment(
+                    [
+                        egui::pos2(divider_x, panel_rect.top()),
+                        egui::pos2(divider_x, panel_rect.bottom()),
+                    ],
+                    egui::Stroke::new(1.0_f32, divider_color),
+                );
                 let favorites_ui = &mut columns[0];
                 favorites_ui.horizontal(|ui| {
                     if ui
