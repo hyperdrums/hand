@@ -27,18 +27,34 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
+const APP_VERSION: &str = "0.2.0";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
     favorites: Vec<String>,
     #[serde(default, deserialize_with = "deserialize_icon_favorites")]
     icon_favorites: Vec<IconFavorite>,
+    #[serde(default)]
+    launcher_dirs: Vec<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
 struct IconFavorite {
     path: String,
     label: String,
+}
+
+#[derive(Clone)]
+struct LauncherFile {
+    path: String,
+    label: String,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RegistrationKind {
+    Path,
+    Icon,
+    LauncherDir,
 }
 
 #[derive(Deserialize)]
@@ -69,12 +85,16 @@ struct HandApp {
     history: Vec<String>,
     favorites: Vec<String>,
     icon_favorites: Vec<IconFavorite>,
+    launcher_dirs: Vec<String>,
+    launcher_files: Vec<LauncherFile>,
     favorite_input: String,
     icon_label_input: String,
-    register_as_icon: bool,
+    icon_edit_label_input: String,
+    registration_kind: RegistrationKind,
     selected_history: Option<usize>,
     selected_favorite: Option<usize>,
     selected_icon_favorite: Option<usize>,
+    selected_launcher_dir: Option<usize>,
     icon_textures: HashMap<String, Option<egui::TextureHandle>>,
     #[cfg(feature = "log-ui")]
     logs: VecDeque<(bool, String)>,
@@ -92,12 +112,16 @@ impl HandApp {
             history: Vec::new(),
             favorites: Vec::new(),
             icon_favorites: Vec::new(),
+            launcher_dirs: Vec::new(),
+            launcher_files: Vec::new(),
             favorite_input: String::new(),
             icon_label_input: String::new(),
-            register_as_icon: false,
+            icon_edit_label_input: String::new(),
+            registration_kind: RegistrationKind::Path,
             selected_history: None,
             selected_favorite: None,
             selected_icon_favorite: None,
+            selected_launcher_dir: None,
             icon_textures: HashMap::new(),
             #[cfg(feature = "log-ui")]
             logs: VecDeque::new(),
@@ -108,6 +132,7 @@ impl HandApp {
             config_path,
         };
         app.load_state();
+        app.refresh_launcher_files();
         app
     }
 
@@ -175,7 +200,22 @@ impl HandApp {
             self.log(format!("指定されたパスが見つかりません: {path}"), true);
             return;
         }
-        if self.register_as_icon {
+        if self.registration_kind == RegistrationKind::LauncherDir {
+            if !Path::new(&path).is_dir() {
+                self.log(
+                    format!("ランチャーDIRにはフォルダを指定してください: {path}"),
+                    true,
+                );
+                return;
+            }
+            if self.launcher_dirs.contains(&path) {
+                self.log("このフォルダは既に登録されています。", true);
+                return;
+            }
+            self.launcher_dirs.insert(0, path.clone());
+            self.selected_launcher_dir = Some(0);
+            self.refresh_launcher_files();
+        } else if self.registration_kind == RegistrationKind::Icon {
             if self
                 .icon_favorites
                 .iter()
@@ -193,10 +233,11 @@ impl HandApp {
                 0,
                 IconFavorite {
                     path: path.clone(),
-                    label,
+                    label: label.clone(),
                 },
             );
             self.selected_icon_favorite = Some(0);
+            self.icon_edit_label_input = label;
         } else {
             if self.favorites.contains(&path) {
                 self.log("このパスは既に登録されています。", true);
@@ -288,6 +329,29 @@ impl HandApp {
         }
     }
 
+    fn select_icon_favorite(&mut self, index: usize) {
+        let Some(favorite) = self.icon_favorites.get(index) else {
+            return;
+        };
+        self.selected_icon_favorite = Some(index);
+        self.icon_edit_label_input = favorite.label.clone();
+    }
+
+    fn save_icon_favorite_label(&mut self) {
+        let Some(index) = self.selected_icon_favorite else {
+            return;
+        };
+        let label = self.icon_edit_label_input.trim().to_owned();
+        if label.is_empty() {
+            return;
+        }
+        let Some(favorite) = self.icon_favorites.get_mut(index) else {
+            return;
+        };
+        favorite.label = label;
+        self.save_state();
+    }
+
     fn remove_selected_icon_favorite(&mut self) {
         let Some(index) = self.selected_icon_favorite else {
             return;
@@ -301,6 +365,61 @@ impl HandApp {
             (!self.icon_favorites.is_empty()).then(|| index.min(self.icon_favorites.len() - 1));
         self.log(format!("アイコンを削除しました: {}", favorite.path), false);
         self.save_state();
+    }
+
+    fn refresh_launcher_files(&mut self) {
+        self.launcher_files.clear();
+        let Some(index) = self.selected_launcher_dir else {
+            return;
+        };
+        let Some(directory) = self.launcher_dirs.get(index) else {
+            return;
+        };
+        let Ok(entries) = fs::read_dir(directory) else {
+            self.log(
+                format!("ランチャーDIRを読み込めませんでした: {directory}"),
+                true,
+            );
+            return;
+        };
+
+        self.launcher_files = entries
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let path = entry.path();
+                path.is_file().then(|| LauncherFile {
+                    label: default_icon_label(&path.to_string_lossy()),
+                    path: path.to_string_lossy().into_owned(),
+                })
+            })
+            .collect();
+        self.launcher_files
+            .sort_by_cached_key(|file| file.label.to_lowercase());
+    }
+
+    fn remove_selected_launcher_dir(&mut self) {
+        let Some(index) = self.selected_launcher_dir else {
+            return;
+        };
+        if index >= self.launcher_dirs.len() {
+            return;
+        }
+        self.launcher_dirs.remove(index);
+        self.selected_launcher_dir =
+            (!self.launcher_dirs.is_empty()).then(|| index.min(self.launcher_dirs.len() - 1));
+        self.refresh_launcher_files();
+        self.save_state();
+    }
+
+    fn open_launcher_file(&mut self, index: usize) {
+        let Some(file) = self.launcher_files.get(index) else {
+            return;
+        };
+        let path = file.path.clone();
+        match open_path(&path) {
+            Ok(()) => self.log(format!("開きました: {path}"), false),
+            Err(error) => self.log(format!("開けませんでした: {error}"), true),
+        }
     }
 
     fn cache_icon(&mut self, ctx: &egui::Context, path: &str) {
@@ -336,8 +455,14 @@ impl HandApp {
                         .into_iter()
                         .filter(|favorite| !favorite.path.trim().is_empty())
                         .collect();
+                    self.launcher_dirs = state
+                        .launcher_dirs
+                        .into_iter()
+                        .filter(|path| Path::new(path).is_dir())
+                        .collect();
                     self.selected_favorite = (!self.favorites.is_empty()).then_some(0);
                     self.selected_icon_favorite = (!self.icon_favorites.is_empty()).then_some(0);
+                    self.selected_launcher_dir = (!self.launcher_dirs.is_empty()).then_some(0);
                     self.log(
                         format!("設定を読み込みました: {}", self.config_path.display()),
                         false,
@@ -354,6 +479,7 @@ impl HandApp {
         let state = SavedState {
             favorites: self.favorites.clone(),
             icon_favorites: self.icon_favorites.clone(),
+            launcher_dirs: self.launcher_dirs.clone(),
         };
         match serde_json::to_string_pretty(&state)
             .and_then(|json| fs::write(&self.config_path, json).map_err(serde_json::Error::io))
@@ -373,23 +499,40 @@ impl eframe::App for HandApp {
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 10)))
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    let path_input_width = if self.register_as_icon { 440.0 } else { 620.0 };
+                    let path_input_width = if self.registration_kind == RegistrationKind::Icon {
+                        440.0
+                    } else {
+                        620.0
+                    };
                     let response = ui.add_sized(
                         [path_input_width, 28.0],
                         egui::TextEdit::singleline(&mut self.favorite_input)
                             .hint_text("ファイルまたはフォルダのパス"),
                     );
                     egui::ComboBox::from_id_salt("favorite_register_mode")
-                        .selected_text(if self.register_as_icon {
-                            "アイコン"
-                        } else {
-                            "パス"
+                        .selected_text(match self.registration_kind {
+                            RegistrationKind::Path => "パス",
+                            RegistrationKind::Icon => "アイコン",
+                            RegistrationKind::LauncherDir => "ランチャーDIR",
                         })
                         .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut self.register_as_icon, false, "パス");
-                            ui.selectable_value(&mut self.register_as_icon, true, "アイコン");
+                            ui.selectable_value(
+                                &mut self.registration_kind,
+                                RegistrationKind::Path,
+                                "パス",
+                            );
+                            ui.selectable_value(
+                                &mut self.registration_kind,
+                                RegistrationKind::Icon,
+                                "アイコン",
+                            );
+                            ui.selectable_value(
+                                &mut self.registration_kind,
+                                RegistrationKind::LauncherDir,
+                                "ランチャーDIR",
+                            );
                         });
-                    if self.register_as_icon {
+                    if self.registration_kind == RegistrationKind::Icon {
                         ui.add_sized(
                             [150.0, 28.0],
                             egui::TextEdit::singleline(&mut self.icon_label_input)
@@ -451,9 +594,6 @@ impl eframe::App for HandApp {
                     if ui.button("開く").clicked() {
                         self.open_selected_history();
                     }
-                    if ui.button("コピー").clicked() {
-                        self.copy_selected_history();
-                    }
                 });
                 ui.separator();
                 ScrollArea::vertical()
@@ -480,12 +620,6 @@ impl eframe::App for HandApp {
                 let favorites_ui = &mut columns[0];
                 favorites_ui.horizontal(|ui| {
                     if ui
-                        .add_enabled(self.selected_favorite.is_some(), egui::Button::new("開く"))
-                        .clicked()
-                    {
-                        self.open_selected_favorite();
-                    }
-                    if ui
                         .add_enabled(self.selected_favorite.is_some(), egui::Button::new("削除"))
                         .clicked()
                     {
@@ -511,7 +645,105 @@ impl eframe::App for HandApp {
                     });
 
                 let icons_ui = &mut columns[1];
+                let selected_dir_label = self
+                    .selected_launcher_dir
+                    .and_then(|index| self.launcher_dirs.get(index))
+                    .and_then(|path| Path::new(path).file_name())
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("フォルダ未登録")
+                    .to_owned();
+                let mut selected_dir_changed = false;
                 icons_ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("launcher_directory")
+                        .selected_text(selected_dir_label)
+                        .show_ui(ui, |ui| {
+                            for index in 0..self.launcher_dirs.len() {
+                                let path = &self.launcher_dirs[index];
+                                let label = Path::new(path)
+                                    .file_name()
+                                    .and_then(|name| name.to_str())
+                                    .unwrap_or(path);
+                                if ui
+                                    .selectable_value(
+                                        &mut self.selected_launcher_dir,
+                                        Some(index),
+                                        label,
+                                    )
+                                    .clicked()
+                                {
+                                    selected_dir_changed = true;
+                                }
+                            }
+                        });
+                    if ui.small_button("更新").clicked() {
+                        self.refresh_launcher_files();
+                    }
+                    if ui
+                        .add_enabled(
+                            self.selected_launcher_dir.is_some(),
+                            egui::Button::new("削除"),
+                        )
+                        .clicked()
+                    {
+                        self.remove_selected_launcher_dir();
+                    }
+                });
+                if selected_dir_changed {
+                    self.refresh_launcher_files();
+                }
+                let launcher_height = (icons_ui.available_height() * 0.48).max(110.0);
+                ScrollArea::vertical()
+                    .max_height(launcher_height)
+                    .show(icons_ui, |ui| {
+                        egui::Grid::new("directory_launcher_grid")
+                            .num_columns(5)
+                            .spacing([8.0, 8.0])
+                            .show(ui, |ui| {
+                                for index in 0..self.launcher_files.len() {
+                                    let file = self.launcher_files[index].clone();
+                                    self.cache_icon(ctx, &file.path);
+                                    let response = ui
+                                        .vertical(|ui| {
+                                            let response = match self
+                                                .icon_textures
+                                                .get(&file.path)
+                                                .and_then(|icon| icon.as_ref())
+                                            {
+                                                Some(icon) => ui.add(egui::ImageButton::new((
+                                                    icon.id(),
+                                                    egui::vec2(40.0, 40.0),
+                                                ))),
+                                                None => ui.add_sized(
+                                                    [40.0, 40.0],
+                                                    egui::Button::new("?"),
+                                                ),
+                                            };
+                                            ui.label(file.label);
+                                            response
+                                        })
+                                        .inner
+                                        .on_hover_text(&file.path);
+                                    if response.double_clicked() {
+                                        self.open_launcher_file(index);
+                                    }
+                                    if (index + 1) % 5 == 0 {
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    });
+                icons_ui.separator();
+                icons_ui.horizontal(|ui| {
+                    ui.add_enabled_ui(self.selected_icon_favorite.is_some(), |ui| {
+                        ui.add_sized(
+                            [150.0, 24.0],
+                            egui::TextEdit::singleline(&mut self.icon_edit_label_input)
+                                .hint_text("表示名"),
+                        );
+                        if ui.button("保存").clicked() {
+                            self.save_icon_favorite_label();
+                        }
+                    });
                     if ui
                         .add_enabled(
                             self.selected_icon_favorite.is_some(),
@@ -564,10 +796,10 @@ impl eframe::App for HandApp {
                                         .inner
                                         .on_hover_text(&path);
                                     if response.clicked() {
-                                        self.selected_icon_favorite = Some(index);
+                                        self.select_icon_favorite(index);
                                     }
                                     if response.double_clicked() {
-                                        self.selected_icon_favorite = Some(index);
+                                        self.select_icon_favorite(index);
                                         self.open_selected_icon_favorite();
                                     }
                                     if (index + 1) % 5 == 0 {
@@ -617,14 +849,22 @@ impl eframe::App for HandApp {
                 ui.label("パス:");
                 let response = ui.text_edit_singleline(&mut self.favorite_input);
                 egui::ComboBox::from_id_salt("favorite_register_mode")
-                    .selected_text(if self.register_as_icon {
+                    .selected_text(if self.registration_kind == RegistrationKind::Icon {
                         "アイコン"
                     } else {
                         "パス"
                     })
                     .show_ui(ui, |ui| {
-                        ui.selectable_value(&mut self.register_as_icon, false, "パス");
-                        ui.selectable_value(&mut self.register_as_icon, true, "アイコン");
+                        ui.selectable_value(
+                            &mut self.registration_kind,
+                            RegistrationKind::Path,
+                            "パス",
+                        );
+                        ui.selectable_value(
+                            &mut self.registration_kind,
+                            RegistrationKind::Icon,
+                            "アイコン",
+                        );
                     });
                 if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
                     self.register_favorite();
@@ -868,6 +1108,7 @@ fn clipboard_files() -> Vec<String> {
 }
 
 fn main() -> eframe::Result<()> {
+    let window_title = format!("H.A.N.D v{APP_VERSION}");
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_inner_size([1120.0, 760.0])
@@ -875,7 +1116,7 @@ fn main() -> eframe::Result<()> {
         ..Default::default()
     };
     eframe::run_native(
-        "H.A.N.D",
+        &window_title,
         options,
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::light());
