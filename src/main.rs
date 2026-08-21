@@ -1,0 +1,886 @@
+#![windows_subsystem = "windows"]
+
+#[cfg(feature = "log-ui")]
+use std::collections::VecDeque;
+
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+    sync::Arc,
+    time::{Duration, Instant},
+};
+
+use arboard::Clipboard;
+#[cfg(feature = "log-ui")]
+use eframe::egui::RichText;
+use eframe::egui::{self, Color32, FontData, FontDefinitions, FontFamily, ScrollArea};
+use serde::{Deserialize, Deserializer, Serialize};
+use windows_sys::Win32::{
+    System::DataExchange::{
+        CloseClipboard, GetClipboardData, IsClipboardFormatAvailable, OpenClipboard,
+    },
+    UI::Shell::DragQueryFileW,
+};
+
+const MAX_HISTORY: usize = 100;
+const POLL_INTERVAL: Duration = Duration::from_millis(1500);
+const CF_HDROP: u32 = 15;
+
+#[derive(Default, Serialize, Deserialize)]
+struct SavedState {
+    favorites: Vec<String>,
+    #[serde(default, deserialize_with = "deserialize_icon_favorites")]
+    icon_favorites: Vec<IconFavorite>,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+struct IconFavorite {
+    path: String,
+    label: String,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StoredIconFavorite {
+    LegacyPath(String),
+    Entry(IconFavorite),
+}
+
+fn deserialize_icon_favorites<'de, D>(deserializer: D) -> Result<Vec<IconFavorite>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let entries = Vec::<StoredIconFavorite>::deserialize(deserializer)?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| match entry {
+            StoredIconFavorite::LegacyPath(path) => IconFavorite {
+                label: default_icon_label(&path),
+                path,
+            },
+            StoredIconFavorite::Entry(entry) => entry,
+        })
+        .collect())
+}
+
+struct HandApp {
+    history: Vec<String>,
+    favorites: Vec<String>,
+    icon_favorites: Vec<IconFavorite>,
+    favorite_input: String,
+    icon_label_input: String,
+    register_as_icon: bool,
+    selected_history: Option<usize>,
+    selected_favorite: Option<usize>,
+    selected_icon_favorite: Option<usize>,
+    icon_textures: HashMap<String, Option<egui::TextureHandle>>,
+    #[cfg(feature = "log-ui")]
+    logs: VecDeque<(bool, String)>,
+    #[cfg(feature = "log-ui")]
+    log_collapsed: bool,
+    last_clipboard_text: String,
+    last_poll: Instant,
+    config_path: PathBuf,
+}
+
+impl HandApp {
+    fn new() -> Self {
+        let config_path = config_path();
+        let mut app = Self {
+            history: Vec::new(),
+            favorites: Vec::new(),
+            icon_favorites: Vec::new(),
+            favorite_input: String::new(),
+            icon_label_input: String::new(),
+            register_as_icon: false,
+            selected_history: None,
+            selected_favorite: None,
+            selected_icon_favorite: None,
+            icon_textures: HashMap::new(),
+            #[cfg(feature = "log-ui")]
+            logs: VecDeque::new(),
+            #[cfg(feature = "log-ui")]
+            log_collapsed: false,
+            last_clipboard_text: String::new(),
+            last_poll: Instant::now(),
+            config_path,
+        };
+        app.load_state();
+        app
+    }
+
+    #[cfg(feature = "log-ui")]
+    fn log(&mut self, message: impl Into<String>, is_error: bool) {
+        if self.logs.len() == 200 {
+            self.logs.pop_front();
+        }
+        self.logs.push_back((is_error, message.into()));
+    }
+
+    #[cfg(not(feature = "log-ui"))]
+    fn log(&mut self, _message: impl Into<String>, _is_error: bool) {}
+
+    fn poll_clipboard(&mut self) {
+        if self.last_poll.elapsed() < POLL_INTERVAL {
+            return;
+        }
+        self.last_poll = Instant::now();
+
+        let files = clipboard_files();
+        if !files.is_empty() {
+            self.last_clipboard_text.clear();
+            self.add_history_items(files, "ファイルコピーを検出しました");
+            return;
+        }
+
+        let Ok(mut clipboard) = Clipboard::new() else {
+            return;
+        };
+        let Ok(text) = clipboard.get_text() else {
+            return;
+        };
+        let text = text.trim().to_owned();
+        if text.is_empty() {
+            self.last_clipboard_text.clear();
+        } else if text != self.last_clipboard_text {
+            self.last_clipboard_text = text.clone();
+            self.add_history_items(vec![text], "コピーを検出しました");
+        }
+    }
+
+    fn add_history_items(&mut self, items: Vec<String>, log_message: &str) {
+        let mut added = false;
+        for item in items {
+            if item.trim().is_empty() || self.history.contains(&item) {
+                continue;
+            }
+            self.history.insert(0, item);
+            added = true;
+        }
+        self.history.truncate(MAX_HISTORY);
+        if added {
+            self.selected_history = Some(0);
+            self.log(log_message, false);
+        }
+    }
+
+    fn register_favorite(&mut self) {
+        let path = self.favorite_input.trim().to_owned();
+        if path.is_empty() {
+            return;
+        }
+        if !PathBuf::from(&path).exists() {
+            self.log(format!("指定されたパスが見つかりません: {path}"), true);
+            return;
+        }
+        if self.register_as_icon {
+            if self
+                .icon_favorites
+                .iter()
+                .any(|favorite| favorite.path == path)
+            {
+                self.log("このパスは既に登録されています。", true);
+                return;
+            }
+            let label = if self.icon_label_input.trim().is_empty() {
+                default_icon_label(&path)
+            } else {
+                self.icon_label_input.trim().to_owned()
+            };
+            self.icon_favorites.insert(
+                0,
+                IconFavorite {
+                    path: path.clone(),
+                    label,
+                },
+            );
+            self.selected_icon_favorite = Some(0);
+        } else {
+            if self.favorites.contains(&path) {
+                self.log("このパスは既に登録されています。", true);
+                return;
+            }
+            self.favorites.insert(0, path.clone());
+            self.selected_favorite = Some(0);
+        }
+        self.favorite_input.clear();
+        self.icon_label_input.clear();
+        self.log(format!("お気に入りを追加しました: {path}"), false);
+        self.save_state();
+    }
+
+    fn copy_selected_history(&mut self) {
+        let Some(index) = self.selected_history else {
+            return;
+        };
+        let Some(text) = self.history.get(index).cloned() else {
+            return;
+        };
+        match Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)) {
+            Ok(()) => self.log("履歴をコピーしました", false),
+            Err(error) => self.log(format!("コピーに失敗しました: {error}"), true),
+        }
+    }
+
+    fn open_selected_history(&mut self) {
+        let Some(index) = self.selected_history else {
+            return;
+        };
+        let Some(value) = self.history.get(index).cloned() else {
+            return;
+        };
+        if PathBuf::from(&value).exists()
+            || ["http://", "https://", "file://"]
+                .iter()
+                .any(|prefix| value.starts_with(prefix))
+        {
+            match open_path(&value) {
+                Ok(()) => self.log(format!("開きました: {value}"), false),
+                Err(error) => self.log(format!("開けませんでした: {error}"), true),
+            }
+        } else {
+            self.log(
+                "開く対象がファイル/フォルダ/URLではありませんでした。",
+                true,
+            );
+        }
+    }
+
+    fn open_selected_favorite(&mut self) {
+        let Some(index) = self.selected_favorite else {
+            return;
+        };
+        let Some(path) = self.favorites.get(index).cloned() else {
+            return;
+        };
+        match open_path(&path) {
+            Ok(()) => self.log(format!("開きました: {path}"), false),
+            Err(error) => self.log(format!("開けませんでした: {error}"), true),
+        }
+    }
+
+    fn remove_selected_favorite(&mut self) {
+        let Some(index) = self.selected_favorite else {
+            return;
+        };
+        if index >= self.favorites.len() {
+            return;
+        }
+        let path = self.favorites.remove(index);
+        self.selected_favorite =
+            (!self.favorites.is_empty()).then(|| index.min(self.favorites.len() - 1));
+        self.log(format!("お気に入りを削除しました: {path}"), false);
+        self.save_state();
+    }
+
+    fn open_selected_icon_favorite(&mut self) {
+        let Some(index) = self.selected_icon_favorite else {
+            return;
+        };
+        let Some(favorite) = self.icon_favorites.get(index).cloned() else {
+            return;
+        };
+        match open_path(&favorite.path) {
+            Ok(()) => self.log(format!("開きました: {}", favorite.path), false),
+            Err(error) => self.log(format!("開けませんでした: {error}"), true),
+        }
+    }
+
+    fn remove_selected_icon_favorite(&mut self) {
+        let Some(index) = self.selected_icon_favorite else {
+            return;
+        };
+        if index >= self.icon_favorites.len() {
+            return;
+        }
+        let favorite = self.icon_favorites.remove(index);
+        self.icon_textures.remove(&favorite.path);
+        self.selected_icon_favorite =
+            (!self.icon_favorites.is_empty()).then(|| index.min(self.icon_favorites.len() - 1));
+        self.log(format!("アイコンを削除しました: {}", favorite.path), false);
+        self.save_state();
+    }
+
+    fn cache_icon(&mut self, ctx: &egui::Context, path: &str) {
+        if self.icon_textures.contains_key(path) {
+            return;
+        }
+        let texture =
+            windows_icons::get_icon_by_path_with_size(path, windows_icons::IconSize::Medium)
+                .ok()
+                .map(|image| {
+                    let size = [image.width() as usize, image.height() as usize];
+                    let pixels = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+                    ctx.load_texture(
+                        format!("file-icon:{path}"),
+                        pixels,
+                        egui::TextureOptions::LINEAR,
+                    )
+                });
+        self.icon_textures.insert(path.to_owned(), texture);
+    }
+
+    fn load_state(&mut self) {
+        match fs::read_to_string(&self.config_path) {
+            Ok(contents) => match serde_json::from_str::<SavedState>(&contents) {
+                Ok(state) => {
+                    self.favorites = state
+                        .favorites
+                        .into_iter()
+                        .filter(|value| !value.trim().is_empty())
+                        .collect();
+                    self.icon_favorites = state
+                        .icon_favorites
+                        .into_iter()
+                        .filter(|favorite| !favorite.path.trim().is_empty())
+                        .collect();
+                    self.selected_favorite = (!self.favorites.is_empty()).then_some(0);
+                    self.selected_icon_favorite = (!self.icon_favorites.is_empty()).then_some(0);
+                    self.log(
+                        format!("設定を読み込みました: {}", self.config_path.display()),
+                        false,
+                    );
+                }
+                Err(error) => self.log(format!("設定の読み込みに失敗しました: {error}"), true),
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.save_state(),
+            Err(error) => self.log(format!("設定の読み込みに失敗しました: {error}"), true),
+        }
+    }
+
+    fn save_state(&mut self) {
+        let state = SavedState {
+            favorites: self.favorites.clone(),
+            icon_favorites: self.icon_favorites.clone(),
+        };
+        match serde_json::to_string_pretty(&state)
+            .and_then(|json| fs::write(&self.config_path, json).map_err(serde_json::Error::io))
+        {
+            Ok(()) => {}
+            Err(error) => self.log(format!("設定の保存に失敗しました: {error}"), true),
+        }
+    }
+}
+
+impl eframe::App for HandApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_clipboard();
+        ctx.request_repaint_after(POLL_INTERVAL);
+
+        egui::TopBottomPanel::top("toolbar")
+            .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 10)))
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    let path_input_width = if self.register_as_icon { 440.0 } else { 620.0 };
+                    let response = ui.add_sized(
+                        [path_input_width, 28.0],
+                        egui::TextEdit::singleline(&mut self.favorite_input)
+                            .hint_text("ファイルまたはフォルダのパス"),
+                    );
+                    egui::ComboBox::from_id_salt("favorite_register_mode")
+                        .selected_text(if self.register_as_icon {
+                            "アイコン"
+                        } else {
+                            "パス"
+                        })
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut self.register_as_icon, false, "パス");
+                            ui.selectable_value(&mut self.register_as_icon, true, "アイコン");
+                        });
+                    if self.register_as_icon {
+                        ui.add_sized(
+                            [150.0, 28.0],
+                            egui::TextEdit::singleline(&mut self.icon_label_input)
+                                .hint_text("表示名"),
+                        );
+                    }
+                    if response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    {
+                        self.register_favorite();
+                    }
+                    if ui.button("追加").clicked() {
+                        self.register_favorite();
+                    }
+                });
+            });
+
+        #[cfg(feature = "log-ui")]
+        egui::TopBottomPanel::bottom("log_panel")
+            .resizable(!self.log_collapsed)
+            .default_height(if self.log_collapsed { 38.0 } else { 150.0 })
+            .min_height(38.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.strong("ログ");
+                    let label = if self.log_collapsed {
+                        "展開"
+                    } else {
+                        "折りたたむ"
+                    };
+                    if ui.small_button(label).clicked() {
+                        self.log_collapsed = !self.log_collapsed;
+                    }
+                });
+                if !self.log_collapsed {
+                    ui.separator();
+                    ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
+                        for (is_error, message) in &self.logs {
+                            let color = if *is_error {
+                                Color32::RED
+                            } else {
+                                ui.visuals().text_color()
+                            };
+                            let prefix = if *is_error { "[ERROR]" } else { "[INFO ]" };
+                            ui.label(RichText::new(format!("{prefix} {message}")).color(color));
+                        }
+                    });
+                }
+            });
+
+        egui::SidePanel::left("history_panel")
+            .resizable(true)
+            .default_width(330.0)
+            .min_width(230.0)
+            .show(ctx, |ui| {
+                ui.visuals_mut().override_text_color = Some(Color32::BLACK);
+                ui.heading("履歴");
+                ui.horizontal(|ui| {
+                    if ui.button("開く").clicked() {
+                        self.open_selected_history();
+                    }
+                    if ui.button("コピー").clicked() {
+                        self.copy_selected_history();
+                    }
+                });
+                ui.separator();
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for index in 0..self.history.len() {
+                            let item = &self.history[index];
+                            let response =
+                                ui.selectable_label(self.selected_history == Some(index), item);
+                            if response.clicked() {
+                                self.selected_history = Some(index);
+                            }
+                            if response.double_clicked() {
+                                self.selected_history = Some(index);
+                                self.copy_selected_history();
+                            }
+                        }
+                    });
+            });
+
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.visuals_mut().override_text_color = Some(Color32::BLACK);
+            ui.columns(2, |columns| {
+                let favorites_ui = &mut columns[0];
+                favorites_ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(self.selected_favorite.is_some(), egui::Button::new("開く"))
+                        .clicked()
+                    {
+                        self.open_selected_favorite();
+                    }
+                    if ui
+                        .add_enabled(self.selected_favorite.is_some(), egui::Button::new("削除"))
+                        .clicked()
+                    {
+                        self.remove_selected_favorite();
+                    }
+                });
+                favorites_ui.separator();
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(favorites_ui, |ui| {
+                        for index in 0..self.favorites.len() {
+                            let path = &self.favorites[index];
+                            let response =
+                                ui.selectable_label(self.selected_favorite == Some(index), path);
+                            if response.clicked() {
+                                self.selected_favorite = Some(index);
+                            }
+                            if response.double_clicked() {
+                                self.selected_favorite = Some(index);
+                                self.open_selected_favorite();
+                            }
+                        }
+                    });
+
+                let icons_ui = &mut columns[1];
+                icons_ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(
+                            self.selected_icon_favorite.is_some(),
+                            egui::Button::new("削除"),
+                        )
+                        .clicked()
+                    {
+                        self.remove_selected_icon_favorite();
+                    }
+                });
+                icons_ui.separator();
+                ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show(icons_ui, |ui| {
+                        egui::Grid::new("icon_favorites_grid_modern")
+                            .num_columns(5)
+                            .spacing([8.0, 8.0])
+                            .show(ui, |ui| {
+                                for index in 0..self.icon_favorites.len() {
+                                    let favorite = self.icon_favorites[index].clone();
+                                    let path = favorite.path;
+                                    let label = favorite.label;
+                                    self.cache_icon(ctx, &path);
+                                    let response = ui
+                                        .vertical(|ui| {
+                                            let response = match self
+                                                .icon_textures
+                                                .get(&path)
+                                                .and_then(|icon| icon.as_ref())
+                                            {
+                                                Some(icon) => ui.add(
+                                                    egui::ImageButton::new((
+                                                        icon.id(),
+                                                        egui::vec2(40.0, 40.0),
+                                                    ))
+                                                    .selected(
+                                                        self.selected_icon_favorite == Some(index),
+                                                    ),
+                                                ),
+                                                None => ui.add_sized(
+                                                    [40.0, 40.0],
+                                                    egui::Button::new("?").selected(
+                                                        self.selected_icon_favorite == Some(index),
+                                                    ),
+                                                ),
+                                            };
+                                            ui.label(label);
+                                            response
+                                        })
+                                        .inner
+                                        .on_hover_text(&path);
+                                    if response.clicked() {
+                                        self.selected_icon_favorite = Some(index);
+                                    }
+                                    if response.double_clicked() {
+                                        self.selected_icon_favorite = Some(index);
+                                        self.open_selected_icon_favorite();
+                                    }
+                                    if (index + 1) % 5 == 0 {
+                                        ui.end_row();
+                                    }
+                                }
+                            });
+                    });
+            });
+        });
+
+        return;
+
+        #[cfg(all(feature = "legacy-layout", feature = "log-ui"))]
+        #[allow(unreachable_code)]
+        egui::CentralPanel::default().show(ctx, |ui| {
+            ui.spacing_mut().item_spacing.y = 8.0;
+            ui.heading("クリップボード履歴");
+            ui.horizontal(|ui| {
+                if ui.button("開く").clicked() {
+                    self.open_selected_history();
+                }
+                if ui.button("コピー").clicked() {
+                    self.copy_selected_history();
+                }
+            });
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ScrollArea::vertical().max_height(185.0).show(ui, |ui| {
+                    for index in 0..self.history.len() {
+                        let item = &self.history[index];
+                        let response =
+                            ui.selectable_label(self.selected_history == Some(index), item);
+                        if response.clicked() {
+                            self.selected_history = Some(index);
+                        }
+                        if response.double_clicked() {
+                            self.selected_history = Some(index);
+                            self.copy_selected_history();
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.heading("お気に入り");
+            ui.horizontal(|ui| {
+                ui.label("パス:");
+                let response = ui.text_edit_singleline(&mut self.favorite_input);
+                egui::ComboBox::from_id_salt("favorite_register_mode")
+                    .selected_text(if self.register_as_icon {
+                        "アイコン"
+                    } else {
+                        "パス"
+                    })
+                    .show_ui(ui, |ui| {
+                        ui.selectable_value(&mut self.register_as_icon, false, "パス");
+                        ui.selectable_value(&mut self.register_as_icon, true, "アイコン");
+                    });
+                if response.lost_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter)) {
+                    self.register_favorite();
+                }
+                if ui.button("追加").clicked() {
+                    self.register_favorite();
+                }
+                if ui
+                    .add_enabled(self.selected_favorite.is_some(), egui::Button::new("削除"))
+                    .clicked()
+                {
+                    self.remove_selected_favorite();
+                }
+                if ui
+                    .add_enabled(self.selected_favorite.is_some(), egui::Button::new("開く"))
+                    .clicked()
+                {
+                    self.open_selected_favorite();
+                }
+            });
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ScrollArea::vertical().max_height(185.0).show(ui, |ui| {
+                    for index in 0..self.favorites.len() {
+                        let path = &self.favorites[index];
+                        let response =
+                            ui.selectable_label(self.selected_favorite == Some(index), path);
+                        if response.clicked() {
+                            self.selected_favorite = Some(index);
+                        }
+                        if response.double_clicked() {
+                            self.selected_favorite = Some(index);
+                            self.open_selected_favorite();
+                        }
+                    }
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.heading("アイコンお気に入り");
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        self.selected_icon_favorite.is_some(),
+                        egui::Button::new("開く"),
+                    )
+                    .clicked()
+                {
+                    self.open_selected_icon_favorite();
+                }
+                if ui
+                    .add_enabled(
+                        self.selected_icon_favorite.is_some(),
+                        egui::Button::new("削除"),
+                    )
+                    .clicked()
+                {
+                    self.remove_selected_icon_favorite();
+                }
+            });
+            egui::Frame::group(ui.style()).show(ui, |ui| {
+                ScrollArea::vertical().max_height(190.0).show(ui, |ui| {
+                    egui::Grid::new("icon_favorites_grid")
+                        .num_columns(8)
+                        .spacing([10.0, 10.0])
+                        .show(ui, |ui| {
+                            for index in 0..self.icon_favorites.len() {
+                                let path = self.icon_favorites[index].path.clone();
+                                self.cache_icon(ctx, &path);
+                                let response = match self
+                                    .icon_textures
+                                    .get(&path)
+                                    .and_then(|icon| icon.as_ref())
+                                {
+                                    Some(icon) => ui.add(
+                                        egui::ImageButton::new((icon.id(), egui::vec2(56.0, 56.0)))
+                                            .selected(self.selected_icon_favorite == Some(index)),
+                                    ),
+                                    None => ui.add_sized(
+                                        [56.0, 56.0],
+                                        egui::Button::new("?")
+                                            .selected(self.selected_icon_favorite == Some(index)),
+                                    ),
+                                };
+                                let response = response.on_hover_text(&path);
+                                if response.clicked() {
+                                    self.selected_icon_favorite = Some(index);
+                                }
+                                if response.double_clicked() {
+                                    self.selected_icon_favorite = Some(index);
+                                    self.open_selected_icon_favorite();
+                                }
+                                if (index + 1) % 8 == 0 {
+                                    ui.end_row();
+                                }
+                            }
+                        });
+                });
+            });
+
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.heading("ログ");
+                let label = if self.log_collapsed {
+                    "展開"
+                } else {
+                    "折りたたむ"
+                };
+                if ui.button(label).clicked() {
+                    self.log_collapsed = !self.log_collapsed;
+                }
+            });
+            if !self.log_collapsed {
+                egui::Frame::group(ui.style()).show(ui, |ui| {
+                    ScrollArea::vertical()
+                        .max_height(120.0)
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for (is_error, message) in &self.logs {
+                                let color = if *is_error {
+                                    Color32::RED
+                                } else {
+                                    ui.visuals().text_color()
+                                };
+                                let prefix = if *is_error { "[ERROR]" } else { "[INFO ]" };
+                                ui.label(RichText::new(format!("{prefix} {message}")).color(color));
+                            }
+                        });
+                });
+            }
+        });
+    }
+}
+
+fn default_icon_label(path: &str) -> String {
+    Path::new(path)
+        .file_stem()
+        .or_else(|| Path::new(path).file_name())
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or(path)
+        .to_owned()
+}
+
+fn open_path(path: &str) -> std::io::Result<()> {
+    let target = Path::new(path);
+    // .code-workspace は関連付け起動が成功扱いでも VS Code に渡らない環境がある。
+    // VS Code 本体が見つかる場合は、ワークスペースを引数として直接起動する。
+    if target
+        .extension()
+        .is_some_and(|extension| extension.eq_ignore_ascii_case("code-workspace"))
+    {
+        if let Some(code_cli) = vscode_cli() {
+            return Command::new("cmd")
+                .arg("/C")
+                .arg(code_cli)
+                .arg("--new-window")
+                .arg(target)
+                .spawn()
+                .map(|_| ());
+        }
+    }
+    open::that(path)
+}
+
+fn vscode_cli() -> Option<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(local_app_data) = std::env::var_os("LOCALAPPDATA") {
+        candidates.push(
+            PathBuf::from(local_app_data)
+                .join("Programs")
+                .join("Microsoft VS Code")
+                .join("bin")
+                .join("code.cmd"),
+        );
+    }
+    for variable in ["ProgramFiles", "ProgramFiles(x86)"] {
+        if let Some(program_files) = std::env::var_os(variable) {
+            candidates.push(
+                PathBuf::from(program_files)
+                    .join("Microsoft VS Code")
+                    .join("bin")
+                    .join("code.cmd"),
+            );
+        }
+    }
+    candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+fn config_path() -> PathBuf {
+    std::env::var_os("USERPROFILE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".pyclip.json")
+}
+
+fn configure_japanese_font(ctx: &egui::Context) {
+    // eframe の標準フォントには日本語グリフがないため、Windows 標準の
+    // Noto Sans JP を最優先のフォールバックとして登録する。
+    let font_path = PathBuf::from(r"C:\Windows\Fonts\NotoSansJP-VF.ttf");
+    let Ok(font_bytes) = fs::read(font_path) else {
+        return;
+    };
+
+    let mut fonts = FontDefinitions::default();
+    let font_name = "noto_sans_jp".to_owned();
+    fonts.font_data.insert(
+        font_name.clone(),
+        Arc::new(FontData::from_owned(font_bytes)),
+    );
+    for family in [FontFamily::Proportional, FontFamily::Monospace] {
+        fonts
+            .families
+            .get_mut(&family)
+            .expect("default font family")
+            .insert(0, font_name.clone());
+    }
+    ctx.set_fonts(fonts);
+}
+
+fn clipboard_files() -> Vec<String> {
+    unsafe {
+        if IsClipboardFormatAvailable(CF_HDROP) == 0 || OpenClipboard(std::ptr::null_mut()) == 0 {
+            return Vec::new();
+        }
+        let handle = GetClipboardData(CF_HDROP);
+        if handle.is_null() {
+            CloseClipboard();
+            return Vec::new();
+        }
+        let count = DragQueryFileW(handle, u32::MAX, std::ptr::null_mut(), 0);
+        let mut paths = Vec::with_capacity(count as usize);
+        for index in 0..count {
+            let length = DragQueryFileW(handle, index, std::ptr::null_mut(), 0);
+            let mut buffer = vec![0_u16; length as usize + 1];
+            DragQueryFileW(handle, index, buffer.as_mut_ptr(), buffer.len() as u32);
+            paths.push(String::from_utf16_lossy(&buffer[..length as usize]));
+        }
+        CloseClipboard();
+        paths
+    }
+}
+
+fn main() -> eframe::Result<()> {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default()
+            .with_inner_size([1120.0, 760.0])
+            .with_min_inner_size([980.0, 700.0]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "H.A.N.D",
+        options,
+        Box::new(|cc| {
+            cc.egui_ctx.set_visuals(egui::Visuals::light());
+            configure_japanese_font(&cc.egui_ctx);
+            Ok(Box::new(HandApp::new()))
+        }),
+    )
+}
