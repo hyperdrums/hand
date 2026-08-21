@@ -3,6 +3,7 @@
 #[cfg(feature = "log-ui")]
 use std::collections::VecDeque;
 
+use std::os::windows::process::CommandExt;
 use std::{
     collections::HashMap,
     fs,
@@ -27,7 +28,8 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.20";
+const APP_VERSION: &str = "0.2.21";
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -1315,6 +1317,7 @@ fn open_path(path: &str) -> std::io::Result<()> {
                 .arg(code_cli)
                 .arg("--new-window")
                 .arg(target)
+                .creation_flags(CREATE_NO_WINDOW)
                 .spawn()
                 .map(|_| ());
         }
