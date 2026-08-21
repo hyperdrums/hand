@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.2";
+const APP_VERSION: &str = "0.2.3";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -90,6 +90,7 @@ struct HandApp {
     favorite_input: String,
     icon_label_input: String,
     icon_edit_label_input: String,
+    search_query: String,
     registration_kind: RegistrationKind,
     selected_history: Option<usize>,
     selected_favorite: Option<usize>,
@@ -117,6 +118,7 @@ impl HandApp {
             favorite_input: String::new(),
             icon_label_input: String::new(),
             icon_edit_label_input: String::new(),
+            search_query: String::new(),
             registration_kind: RegistrationKind::Path,
             selected_history: None,
             selected_favorite: None,
@@ -146,6 +148,11 @@ impl HandApp {
 
     #[cfg(not(feature = "log-ui"))]
     fn log(&mut self, _message: impl Into<String>, _is_error: bool) {}
+
+    fn matches_search(&self, value: &str) -> bool {
+        let query = self.search_query.trim();
+        query.is_empty() || value.to_lowercase().contains(&query.to_lowercase())
+    }
 
     fn poll_clipboard(&mut self) {
         if self.last_poll.elapsed() < POLL_INTERVAL {
@@ -512,9 +519,9 @@ impl eframe::App for HandApp {
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
                     let path_input_width = if self.registration_kind == RegistrationKind::Icon {
-                        440.0
+                        280.0
                     } else {
-                        620.0
+                        400.0
                     };
                     let response = ui.add_sized(
                         [path_input_width, 28.0],
@@ -559,6 +566,12 @@ impl eframe::App for HandApp {
                     if ui.button("追加").clicked() {
                         self.register_favorite();
                     }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.add_sized(
+                            [240.0, 28.0],
+                            egui::TextEdit::singleline(&mut self.search_query).hint_text("検索"),
+                        );
+                    });
                 });
             });
 
@@ -613,6 +626,9 @@ impl eframe::App for HandApp {
                     .show(ui, |ui| {
                         for index in 0..self.history.len() {
                             let item = &self.history[index];
+                            if !self.matches_search(item) {
+                                continue;
+                            }
                             let response =
                                 ui.selectable_label(self.selected_history == Some(index), item);
                             if response.clicked() {
@@ -647,6 +663,9 @@ impl eframe::App for HandApp {
                     .show(favorites_ui, |ui| {
                         for index in 0..self.favorites.len() {
                             let path = &self.favorites[index];
+                            if !self.matches_search(path) {
+                                continue;
+                            }
                             let response =
                                 ui.selectable_label(self.selected_favorite == Some(index), path);
                             if response.clicked() {
@@ -712,6 +731,10 @@ impl eframe::App for HandApp {
                     .show(icons_ui, |ui| {
                         for index in 0..self.launcher_files.len() {
                             let file = self.launcher_files[index].clone();
+                            if !self.matches_search(&file.label) && !self.matches_search(&file.path)
+                            {
+                                continue;
+                            }
                             self.cache_icon(ctx, &file.path);
                             let row = ui.horizontal(|ui| {
                                 let _ = match self
@@ -764,6 +787,11 @@ impl eframe::App for HandApp {
                     .show(icons_ui, |ui| {
                         for index in 0..self.icon_favorites.len() {
                             let favorite = self.icon_favorites[index].clone();
+                            if !self.matches_search(&favorite.label)
+                                && !self.matches_search(&favorite.path)
+                            {
+                                continue;
+                            }
                             self.cache_icon(ctx, &favorite.path);
                             let row = ui.horizontal(|ui| {
                                 let _ = match self
