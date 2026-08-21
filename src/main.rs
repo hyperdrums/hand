@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.14";
+const APP_VERSION: &str = "0.2.15";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -242,6 +242,19 @@ impl HandApp {
             .or_else(|| matches.first().copied());
         self.select_search_result(pane, index);
         index.is_some()
+    }
+
+    fn select_initial_search_result(&mut self) -> Option<SearchPane> {
+        if let Some(index) = self.matching_favorite_indices().first().copied() {
+            self.select_search_result(SearchPane::Favorites, Some(index));
+            Some(SearchPane::Favorites)
+        } else if let Some(index) = self.matching_launcher_indices().first().copied() {
+            self.select_search_result(SearchPane::Launcher, Some(index));
+            Some(SearchPane::Launcher)
+        } else {
+            self.select_search_result(self.search_pane, None);
+            None
+        }
     }
 
     fn open_search_selection(&mut self) {
@@ -618,11 +631,13 @@ impl eframe::App for HandApp {
         self.poll_clipboard();
         ctx.request_repaint_after(POLL_INTERVAL);
         let search_id = egui::Id::new("global_search");
-        let focus_search =
-            ctx.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::F));
-        let search_has_focus = focus_search || ctx.memory(|memory| memory.has_focus(search_id));
+        let search_was_focused = ctx.memory(|memory| memory.has_focus(search_id));
+        let focus_search = !search_was_focused
+            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Slash));
+        let search_has_focus = focus_search || search_was_focused;
         let mut scroll_to_favorite = false;
         let mut scroll_to_launcher = false;
+        let mut search_changed = false;
 
         if search_has_focus {
             if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
@@ -646,11 +661,23 @@ impl eframe::App for HandApp {
             } else if ctx
                 .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
             {
-                scroll_to_favorite = self.switch_search_pane(SearchPane::Favorites);
+                let next_pane = match self.search_pane {
+                    SearchPane::Favorites => SearchPane::Launcher,
+                    SearchPane::Launcher => SearchPane::Favorites,
+                };
+                let has_selection = self.switch_search_pane(next_pane);
+                scroll_to_favorite = has_selection && next_pane == SearchPane::Favorites;
+                scroll_to_launcher = has_selection && next_pane == SearchPane::Launcher;
             } else if ctx
                 .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
             {
-                scroll_to_launcher = self.switch_search_pane(SearchPane::Launcher);
+                let next_pane = match self.search_pane {
+                    SearchPane::Favorites => SearchPane::Launcher,
+                    SearchPane::Launcher => SearchPane::Favorites,
+                };
+                let has_selection = self.switch_search_pane(next_pane);
+                scroll_to_favorite = has_selection && next_pane == SearchPane::Favorites;
+                scroll_to_launcher = has_selection && next_pane == SearchPane::Launcher;
             } else if ctx
                 .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
             {
@@ -720,9 +747,18 @@ impl eframe::App for HandApp {
                         if focus_search {
                             search_response.request_focus();
                         }
+                        search_changed = search_response.changed();
                     });
                 });
             });
+
+        if search_changed && !self.search_query.trim().is_empty() {
+            match self.select_initial_search_result() {
+                Some(SearchPane::Favorites) => scroll_to_favorite = true,
+                Some(SearchPane::Launcher) => scroll_to_launcher = true,
+                None => {}
+            }
+        }
 
         #[cfg(feature = "log-ui")]
         egui::TopBottomPanel::bottom("log_panel")
