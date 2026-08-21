@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.15";
+const APP_VERSION: &str = "0.2.16";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -631,10 +631,9 @@ impl eframe::App for HandApp {
         self.poll_clipboard();
         ctx.request_repaint_after(POLL_INTERVAL);
         let search_id = egui::Id::new("global_search");
-        let search_was_focused = ctx.memory(|memory| memory.has_focus(search_id));
-        let focus_search = !search_was_focused
-            && ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Slash));
-        let search_has_focus = focus_search || search_was_focused;
+        let focus_search =
+            ctx.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::F));
+        let search_has_focus = focus_search || ctx.memory(|memory| memory.has_focus(search_id));
         let mut scroll_to_favorite = false;
         let mut scroll_to_launcher = false;
         let mut search_changed = false;
