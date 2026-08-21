@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.10";
+const APP_VERSION: &str = "0.2.11";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -627,8 +627,11 @@ impl eframe::App for HandApp {
                             if !self.matches_search(item) {
                                 continue;
                             }
-                            let response =
-                                ui.selectable_label(self.selected_history == Some(index), item);
+                            let response = ui.add_sized(
+                                [ui.available_width(), 24.0],
+                                egui::Button::new(item)
+                                    .selected(self.selected_history == Some(index)),
+                            );
                             if response.clicked() {
                                 self.selected_history = Some(index);
                             }
@@ -675,8 +678,11 @@ impl eframe::App for HandApp {
                             if !self.matches_search(path) {
                                 continue;
                             }
-                            let response =
-                                ui.selectable_label(self.selected_favorite == Some(index), path);
+                            let response = ui.add_sized(
+                                [ui.available_width(), 24.0],
+                                egui::Button::new(path)
+                                    .selected(self.selected_favorite == Some(index)),
+                            );
                             if response.clicked() {
                                 self.selected_favorite = Some(index);
                             }
@@ -798,41 +804,23 @@ impl eframe::App for HandApp {
                                 continue;
                             }
                             self.cache_icon(ctx, &favorite.path);
-                            let (rect, response) = ui.allocate_exact_size(
-                                egui::vec2(ui.available_width(), 24.0),
-                                egui::Sense::click(),
-                            );
-                            let fill = if self.selected_icon_favorite == Some(index) {
-                                ui.visuals().selection.bg_fill
-                            } else if response.hovered() {
-                                ui.visuals().widgets.hovered.bg_fill
-                            } else {
-                                Color32::TRANSPARENT
+                            let button = match self
+                                .icon_textures
+                                .get(&favorite.path)
+                                .and_then(|icon| icon.as_ref())
+                            {
+                                Some(icon) => egui::Button::image_and_text(
+                                    egui::Image::new((icon.id(), egui::vec2(20.0, 20.0))),
+                                    &favorite.label,
+                                ),
+                                None => egui::Button::new(format!("?  {}", favorite.label)),
                             };
-                            if fill != Color32::TRANSPARENT {
-                                ui.painter().rect_filled(rect, 3.0, fill);
-                            }
-                            ui.allocate_new_ui(
-                                egui::UiBuilder::new().max_rect(rect.shrink2(egui::vec2(4.0, 2.0))),
-                                |row_ui| {
-                                    row_ui.horizontal(|ui| {
-                                        let _ = match self
-                                            .icon_textures
-                                            .get(&favorite.path)
-                                            .and_then(|icon| icon.as_ref())
-                                        {
-                                            Some(icon) => {
-                                                ui.image((icon.id(), egui::vec2(20.0, 20.0)))
-                                            }
-                                            None => {
-                                                ui.add_sized([20.0, 20.0], egui::Label::new("?"))
-                                            }
-                                        };
-                                        ui.label(&favorite.label);
-                                    });
-                                },
-                            );
-                            let response = response.on_hover_text(&favorite.path);
+                            let response = ui
+                                .add_sized(
+                                    [ui.available_width(), 24.0],
+                                    button.selected(self.selected_icon_favorite == Some(index)),
+                                )
+                                .on_hover_text(&favorite.path);
                             if response.clicked() {
                                 self.select_icon_favorite(index);
                             }
