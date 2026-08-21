@@ -27,7 +27,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.12";
+const APP_VERSION: &str = "0.2.13";
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -632,9 +632,9 @@ impl eframe::App for HandApp {
                             if !self.matches_search(item) {
                                 continue;
                             }
-                            let response = ui.add_sized(
-                                [ui.available_width(), 24.0],
+                            let response = ui.add(
                                 egui::Button::new(item)
+                                    .min_size(egui::vec2(ui.available_width(), 24.0))
                                     .selected(self.selected_history == Some(index)),
                             );
                             if response.clicked() {
@@ -683,9 +683,9 @@ impl eframe::App for HandApp {
                             if !self.matches_search(path) {
                                 continue;
                             }
-                            let response = ui.add_sized(
-                                [ui.available_width(), 24.0],
+                            let response = ui.add(
                                 egui::Button::new(path)
+                                    .min_size(egui::vec2(ui.available_width(), 24.0))
                                     .selected(self.selected_favorite == Some(index)),
                             );
                             if response.clicked() {
