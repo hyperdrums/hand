@@ -1,7 +1,7 @@
 use std::{env, fs::File, path::PathBuf};
 
 use ico::{IconDir, IconDirEntry, IconImage, ResourceType};
-use image::{ImageReader, imageops::FilterType};
+use image::{DynamicImage, ImageReader, RgbaImage, imageops::FilterType};
 
 fn main() {
     println!("cargo:rerun-if-changed=assets/hand-icon.png");
@@ -13,9 +13,19 @@ fn main() {
         .expect("app icon PNG must exist")
         .decode()
         .expect("app icon PNG must be readable");
+    let source = source.to_rgba8();
+    let square_size = source.width().max(source.height());
+    let mut square = RgbaImage::new(square_size, square_size);
+    image::imageops::overlay(
+        &mut square,
+        &source,
+        i64::from((square_size - source.width()) / 2),
+        i64::from((square_size - source.height()) / 2),
+    );
+    let square = DynamicImage::ImageRgba8(square);
     let mut icon_dir = IconDir::new(ResourceType::Icon);
     for size in [16, 24, 32, 48, 64, 128, 256] {
-        let image = source
+        let image = square
             .resize_exact(size, size, FilterType::Lanczos3)
             .to_rgba8();
         let icon = IconImage::from_rgba_data(size, size, image.into_raw());
