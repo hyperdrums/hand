@@ -875,7 +875,9 @@ impl eframe::App for HandApp {
                                 .hint_text("表示名"),
                         );
                     }
-                    if response.has_focus() && ui.input(|input| input.key_pressed(egui::Key::Enter))
+                    // singleline の TextEdit は Enter でフォーカスを手放すため lost_focus で判定する。
+                    if response.lost_focus()
+                        && ui.input(|input| input.key_pressed(egui::Key::Enter))
                     {
                         self.register_favorite();
                     }
