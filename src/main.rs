@@ -10,7 +10,11 @@ use std::{
     io::Write,
     path::{Path, PathBuf},
     process::Command,
-    sync::Arc,
+    sync::{
+        Arc,
+        mpsc::{self, Receiver, TryRecvError},
+    },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -32,6 +36,10 @@ const CF_HDROP: u32 = 15;
 const APP_VERSION: &str = "0.2.23";
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAX_LAUNCHER_RECENTS: usize = 200;
+const MAX_LAUNCHER_DEPTH: usize = 8;
+const MAX_LAUNCHER_FILES: usize = 5000;
+const MAX_ICON_LOADS_PER_FRAME: usize = 16;
+const LIST_ROW_HEIGHT: f32 = 24.0;
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -56,6 +64,11 @@ struct IconFavorite {
 struct LauncherFile {
     path: String,
     label: String,
+}
+
+struct LauncherScan {
+    directory: String,
+    result: std::io::Result<(Vec<LauncherFile>, bool)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -110,6 +123,7 @@ struct HandApp {
     launcher_dirs: Vec<String>,
     launcher_files: Vec<LauncherFile>,
     launcher_dir_unavailable: bool,
+    launcher_scan: Option<Receiver<LauncherScan>>,
     launcher_recent: Vec<String>,
     launcher_sort: LauncherSort,
     favorite_input: String,
@@ -125,6 +139,9 @@ struct HandApp {
     search_pane: SearchPane,
     search_result_highlight: bool,
     icon_textures: HashMap<String, Option<egui::TextureHandle>>,
+    launcher_icon_textures: HashMap<String, Option<egui::TextureHandle>>,
+    icon_load_budget: usize,
+    ctx: egui::Context,
     #[cfg(feature = "log-ui")]
     logs: VecDeque<(bool, String)>,
     #[cfg(feature = "log-ui")]
@@ -137,7 +154,7 @@ struct HandApp {
 }
 
 impl HandApp {
-    fn new() -> Self {
+    fn new(ctx: egui::Context) -> Self {
         let config_path = config_path();
         let mut app = Self {
             history: Vec::new(),
@@ -146,6 +163,7 @@ impl HandApp {
             launcher_dirs: Vec::new(),
             launcher_files: Vec::new(),
             launcher_dir_unavailable: false,
+            launcher_scan: None,
             launcher_recent: Vec::new(),
             launcher_sort: LauncherSort::Name,
             favorite_input: String::new(),
@@ -161,6 +179,9 @@ impl HandApp {
             search_pane: SearchPane::Favorites,
             search_result_highlight: false,
             icon_textures: HashMap::new(),
+            launcher_icon_textures: HashMap::new(),
+            icon_load_budget: MAX_ICON_LOADS_PER_FRAME,
+            ctx,
             #[cfg(feature = "log-ui")]
             logs: VecDeque::new(),
             #[cfg(feature = "log-ui")]
@@ -583,24 +604,67 @@ impl HandApp {
         self.launcher_files.clear();
         self.selected_launcher_file = None;
         self.launcher_dir_unavailable = false;
+        self.launcher_icon_textures.clear();
+        // 走査中の古い結果は Receiver を捨てることで破棄する。
+        self.launcher_scan = None;
         let Some(index) = self.selected_launcher_dir else {
             return;
         };
         let Some(directory) = self.launcher_dirs.get(index).cloned() else {
             return;
         };
-        if fs::read_dir(&directory).is_err() {
-            self.launcher_dir_unavailable = true;
-            self.log(
-                format!("ランチャーDIRを読み込めませんでした: {directory}"),
-                true,
-            );
-            return;
-        }
 
-        collect_launcher_files(Path::new(&directory), &mut self.launcher_files);
-        add_duplicate_parent_labels(&mut self.launcher_files);
-        self.sort_launcher_files();
+        // 大きなフォルダや未接続のネットワークドライブで UI が固まらないよう、別スレッドで走査する。
+        let (sender, receiver) = mpsc::channel();
+        let ctx = self.ctx.clone();
+        thread::spawn(move || {
+            let result = scan_launcher_dir(Path::new(&directory));
+            if sender.send(LauncherScan { directory, result }).is_ok() {
+                ctx.request_repaint();
+            }
+        });
+        self.launcher_scan = Some(receiver);
+    }
+
+    fn poll_launcher_scan(&mut self) {
+        let Some(receiver) = &self.launcher_scan else {
+            return;
+        };
+        let scan = match receiver.try_recv() {
+            Ok(scan) => scan,
+            Err(TryRecvError::Empty) => return,
+            Err(TryRecvError::Disconnected) => {
+                self.launcher_scan = None;
+                return;
+            }
+        };
+        self.launcher_scan = None;
+        match scan.result {
+            Ok((files, truncated)) => {
+                self.launcher_files = files;
+                if truncated {
+                    self.log(
+                        format!(
+                            "ランチャーDIRが大きいため一部のみ表示しています(最大{MAX_LAUNCHER_FILES}件・深さ{MAX_LAUNCHER_DEPTH}): {}",
+                            scan.directory
+                        ),
+                        true,
+                    );
+                }
+                add_duplicate_parent_labels(&mut self.launcher_files);
+                self.sort_launcher_files();
+            }
+            Err(error) => {
+                self.launcher_dir_unavailable = true;
+                self.log(
+                    format!(
+                        "ランチャーDIRを読み込めませんでした: {} ({error})",
+                        scan.directory
+                    ),
+                    true,
+                );
+            }
+        }
     }
 
     fn sort_launcher_files(&mut self) {
@@ -672,23 +736,25 @@ impl HandApp {
         }
     }
 
-    fn cache_icon(&mut self, ctx: &egui::Context, path: &str) {
-        if self.icon_textures.contains_key(path) {
-            return;
+    fn icon_texture(&mut self, path: &str, is_launcher: bool) -> Option<egui::TextureId> {
+        let cache = if is_launcher {
+            &mut self.launcher_icon_textures
+        } else {
+            &mut self.icon_textures
+        };
+        if let Some(texture) = cache.get(path) {
+            return texture.as_ref().map(egui::TextureHandle::id);
         }
-        let texture =
-            windows_icons::get_icon_by_path_with_size(path, windows_icons::IconSize::Medium)
-                .ok()
-                .map(|image| {
-                    let size = [image.width() as usize, image.height() as usize];
-                    let pixels = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
-                    ctx.load_texture(
-                        format!("file-icon:{path}"),
-                        pixels,
-                        egui::TextureOptions::LINEAR,
-                    )
-                });
-        self.icon_textures.insert(path.to_owned(), texture);
+        // アイコン取得は同期処理のため、1フレームあたりの件数を制限して残りは次フレームへ回す。
+        if self.icon_load_budget == 0 {
+            self.ctx.request_repaint();
+            return None;
+        }
+        self.icon_load_budget -= 1;
+        let texture = load_icon_texture(&self.ctx, path);
+        let id = texture.as_ref().map(egui::TextureHandle::id);
+        cache.insert(path.to_owned(), texture);
+        id
     }
 
     fn load_state(&mut self) {
@@ -774,6 +840,8 @@ impl HandApp {
 impl eframe::App for HandApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_clipboard();
+        self.poll_launcher_scan();
+        self.icon_load_budget = MAX_ICON_LOADS_PER_FRAME;
         ctx.request_repaint_after(POLL_INTERVAL);
         let search_id = egui::Id::new("global_search");
         let focus_search =
@@ -1129,24 +1197,37 @@ impl eframe::App for HandApp {
                         "フォルダにアクセスできません(未接続の可能性があります)",
                     );
                 }
+                if self.launcher_scan.is_some() {
+                    icons_ui.label("読み込み中…");
+                }
                 let launcher_height = (icons_ui.available_height() * 0.48).max(110.0);
-                ScrollArea::vertical()
-                    .max_height(launcher_height)
-                    .show(icons_ui, |ui| {
-                        for index in 0..self.launcher_files.len() {
-                            let file = self.launcher_files[index].clone();
-                            if !self.matches_search(&file.label) && !self.matches_search(&file.path)
-                            {
+                let launcher_matches = self.matching_launcher_indices();
+                let mut launcher_scroll = ScrollArea::vertical()
+                    .id_salt("launcher_files")
+                    .max_height(launcher_height);
+                // show_rows では画面外の行が描画されず scroll_to_me が使えないため、位置を計算して寄せる。
+                if scroll_to_launcher
+                    && let Some(position) = self.selected_launcher_file.and_then(|selected| {
+                        launcher_matches.iter().position(|index| *index == selected)
+                    })
+                {
+                    let row_pitch = LIST_ROW_HEIGHT + icons_ui.spacing().item_spacing.y;
+                    let offset =
+                        position as f32 * row_pitch - (launcher_height - LIST_ROW_HEIGHT) / 2.0;
+                    launcher_scroll = launcher_scroll.vertical_scroll_offset(offset.max(0.0));
+                }
+                launcher_scroll.show_rows(
+                    icons_ui,
+                    LIST_ROW_HEIGHT,
+                    launcher_matches.len(),
+                    |ui, row_range| {
+                        for &index in &launcher_matches[row_range] {
+                            let Some(file) = self.launcher_files.get(index).cloned() else {
                                 continue;
-                            }
-                            self.cache_icon(ctx, &file.path);
-                            let button = match self
-                                .icon_textures
-                                .get(&file.path)
-                                .and_then(|icon| icon.as_ref())
-                            {
+                            };
+                            let button = match self.icon_texture(&file.path, true) {
                                 Some(icon) => egui::Button::image_and_text(
-                                    egui::Image::new((icon.id(), egui::vec2(20.0, 20.0))),
+                                    egui::Image::new((icon, egui::vec2(20.0, 20.0))),
                                     &file.label,
                                 ),
                                 None => egui::Button::new(format!("?  {}", file.label)),
@@ -1162,7 +1243,7 @@ impl eframe::App for HandApp {
                                 button.selected(self.selected_launcher_file == Some(index))
                             };
                             let response = ui
-                                .add_sized([ui.available_width(), 24.0], button)
+                                .add_sized([ui.available_width(), LIST_ROW_HEIGHT], button)
                                 .on_hover_text(&file.path);
                             if response.clicked() {
                                 self.selected_launcher_file = Some(index);
@@ -1175,11 +1256,9 @@ impl eframe::App for HandApp {
                                 self.selected_launcher_file = Some(index);
                                 self.open_launcher_file(index);
                             }
-                            if scroll_to_launcher && self.selected_launcher_file == Some(index) {
-                                response.scroll_to_me(Some(egui::Align::Center));
-                            }
                         }
-                    });
+                    },
+                );
                 icons_ui.separator();
                 icons_ui.horizontal(|ui| {
                     ui.add_enabled_ui(self.selected_icon_favorite.is_some(), |ui| {
@@ -1213,14 +1292,9 @@ impl eframe::App for HandApp {
                             {
                                 continue;
                             }
-                            self.cache_icon(ctx, &favorite.path);
-                            let button = match self
-                                .icon_textures
-                                .get(&favorite.path)
-                                .and_then(|icon| icon.as_ref())
-                            {
+                            let button = match self.icon_texture(&favorite.path, false) {
                                 Some(icon) => egui::Button::image_and_text(
-                                    egui::Image::new((icon.id(), egui::vec2(20.0, 20.0))),
+                                    egui::Image::new((icon, egui::vec2(20.0, 20.0))),
                                     &favorite.label,
                                 ),
                                 None => egui::Button::new(format!("?  {}", favorite.label)),
@@ -1277,12 +1351,39 @@ fn add_duplicate_parent_labels(files: &mut [LauncherFile]) {
     }
 }
 
-fn collect_launcher_files(directory: &Path, files: &mut Vec<LauncherFile>) {
+fn load_icon_texture(ctx: &egui::Context, path: &str) -> Option<egui::TextureHandle> {
+    windows_icons::get_icon_by_path_with_size(path, windows_icons::IconSize::Medium)
+        .ok()
+        .map(|image| {
+            let size = [image.width() as usize, image.height() as usize];
+            let pixels = egui::ColorImage::from_rgba_unmultiplied(size, image.as_raw());
+            ctx.load_texture(
+                format!("file-icon:{path}"),
+                pixels,
+                egui::TextureOptions::LINEAR,
+            )
+        })
+}
+
+fn scan_launcher_dir(directory: &Path) -> std::io::Result<(Vec<LauncherFile>, bool)> {
+    // ルート自体が読めない場合だけをエラーとし、配下の読めないフォルダは読み飛ばす。
+    fs::read_dir(directory)?;
+    let mut files = Vec::new();
+    let truncated = collect_launcher_files(directory, 0, &mut files);
+    Ok((files, truncated))
+}
+
+/// 上限に達して打ち切った場合は true を返す。
+fn collect_launcher_files(directory: &Path, depth: usize, files: &mut Vec<LauncherFile>) -> bool {
     let Ok(entries) = fs::read_dir(directory) else {
-        return;
+        return false;
     };
 
+    let mut truncated = false;
     for entry in entries.flatten() {
+        if files.len() >= MAX_LAUNCHER_FILES {
+            return true;
+        }
         let Ok(file_type) = entry.file_type() else {
             continue;
         };
@@ -1293,7 +1394,9 @@ fn collect_launcher_files(directory: &Path, files: &mut Vec<LauncherFile>) {
 
         let path = entry.path();
         if file_type.is_dir() {
-            collect_launcher_files(&path, files);
+            if depth >= MAX_LAUNCHER_DEPTH || collect_launcher_files(&path, depth + 1, files) {
+                truncated = true;
+            }
         } else if file_type.is_file() {
             files.push(LauncherFile {
                 label: default_icon_label(&path.to_string_lossy()),
@@ -1301,6 +1404,7 @@ fn collect_launcher_files(directory: &Path, files: &mut Vec<LauncherFile>) {
             });
         }
     }
+    truncated
 }
 
 fn default_icon_label(path: &str) -> String {
@@ -1448,7 +1552,7 @@ fn main() -> eframe::Result<()> {
         Box::new(|cc| {
             cc.egui_ctx.set_visuals(egui::Visuals::light());
             configure_japanese_font(&cc.egui_ctx);
-            Ok(Box::new(HandApp::new()))
+            Ok(Box::new(HandApp::new(cc.egui_ctx.clone())))
         }),
     )
 }
