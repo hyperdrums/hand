@@ -41,9 +41,9 @@ const MAX_LAUNCHER_FILES: usize = 5000;
 const MAX_ICON_LOADS_PER_FRAME: usize = 16;
 const LIST_ROW_HEIGHT: f32 = 24.0;
 const HISTORY_PREVIEW_CHARS: usize = 80;
+const HISTORY_TOOLTIP_CHARS: usize = 2000;
 const SEARCH_HIGHLIGHT_FILL: Color32 = Color32::from_rgb(255, 196, 110);
 const SEARCH_HIGHLIGHT_STROKE: Color32 = Color32::from_rgb(190, 105, 20);
-const HISTORY_TOOLTIP_CHARS: usize = 2000;
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -82,7 +82,7 @@ enum RegistrationKind {
     LauncherDir,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum SearchPane {
     Favorites,
     Launcher,
@@ -159,8 +159,16 @@ struct HandApp {
 
 impl HandApp {
     fn new(ctx: egui::Context) -> Self {
-        let config_path = config_path();
-        let mut app = Self {
+        let mut app = Self::empty(ctx, config_path());
+        app.migrate_legacy_config();
+        app.load_state();
+        app.refresh_launcher_files();
+        app
+    }
+
+    /// 設定ファイルを読み書きせずに空の状態を作る。
+    fn empty(ctx: egui::Context, config_path: PathBuf) -> Self {
+        Self {
             history: Vec::new(),
             favorites: Vec::new(),
             icon_favorites: Vec::new(),
@@ -195,11 +203,7 @@ impl HandApp {
             last_poll: Instant::now(),
             config_path,
             save_blocked: false,
-        };
-        app.migrate_legacy_config();
-        app.load_state();
-        app.refresh_launcher_files();
-        app
+        }
     }
 
     #[cfg(feature = "log-ui")]
@@ -1623,4 +1627,140 @@ fn main() -> eframe::Result<()> {
             Ok(Box::new(HandApp::new(cc.egui_ctx.clone())))
         }),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_app() -> HandApp {
+        HandApp::empty(egui::Context::default(), PathBuf::from("unused.json"))
+    }
+
+    fn temp_dir(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("hand-test-{name}-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn truncate_chars_counts_characters_not_bytes() {
+        assert_eq!(truncate_chars("あいうえお", 3), "あいう…");
+        assert_eq!(truncate_chars("abc", 3), "abc");
+        assert_eq!(truncate_chars("", 3), "");
+    }
+
+    #[test]
+    fn history_preview_shows_first_line_only() {
+        assert_eq!(history_preview("  first\nsecond"), "first …");
+        assert_eq!(history_preview("single"), "single");
+        let long = "x".repeat(HISTORY_PREVIEW_CHARS + 5);
+        assert_eq!(
+            history_preview(&long),
+            format!("{}…", "x".repeat(HISTORY_PREVIEW_CHARS))
+        );
+    }
+
+    #[test]
+    fn duplicate_labels_get_parent_folder_suffix() {
+        let mut files = vec![
+            LauncherFile {
+                path: r"C:\a\readme.txt".into(),
+                label: "readme.txt".into(),
+            },
+            LauncherFile {
+                path: r"C:\b\readme.txt".into(),
+                label: "readme.txt".into(),
+            },
+            LauncherFile {
+                path: r"C:\a\only.txt".into(),
+                label: "only.txt".into(),
+            },
+        ];
+        add_duplicate_parent_labels(&mut files);
+        let labels: Vec<_> = files.iter().map(|file| file.label.as_str()).collect();
+        assert_eq!(labels, ["readme.txt (a)", "readme.txt (b)", "only.txt"]);
+    }
+
+    #[test]
+    fn legacy_icon_favorites_are_migrated() {
+        let json = r#"{"favorites":[],"icon_favorites":["C:\\tools\\app.exe",{"path":"C:\\x.txt","label":"X"}]}"#;
+        let state: SavedState = serde_json::from_str(json).unwrap();
+        assert_eq!(state.icon_favorites.len(), 2);
+        assert_eq!(state.icon_favorites[0].label, "app.exe");
+        assert_eq!(state.icon_favorites[1].label, "X");
+        assert!(state.launcher_dirs.is_empty());
+        assert!(state.launcher_sort == LauncherSort::Name);
+    }
+
+    #[test]
+    fn collect_launcher_files_respects_depth_limit() {
+        let root = temp_dir("depth");
+        let mut deep = root.clone();
+        for level in 0..=MAX_LAUNCHER_DEPTH + 1 {
+            deep = deep.join(format!("d{level}"));
+            fs::create_dir_all(&deep).unwrap();
+            fs::write(deep.join(format!("f{level}.txt")), "").unwrap();
+        }
+        let (files, truncated) = scan_launcher_dir(&root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+        // サブフォルダは MAX_LAUNCHER_DEPTH 階層まで走査し、それより深い階層は打ち切る。
+        assert!(truncated);
+        assert_eq!(files.len(), MAX_LAUNCHER_DEPTH);
+    }
+
+    #[test]
+    fn scan_launcher_dir_reports_missing_root() {
+        let missing = std::env::temp_dir().join("hand-test-definitely-missing");
+        assert!(scan_launcher_dir(&missing).is_err());
+    }
+
+    #[test]
+    fn write_atomically_replaces_existing_file() {
+        let dir = temp_dir("atomic");
+        let path = dir.join("nested").join("config.json");
+        write_atomically(&path, b"first").unwrap();
+        write_atomically(&path, b"second").unwrap();
+        let contents = fs::read_to_string(&path).unwrap();
+        let temp_left = path.with_extension("json.tmp").exists();
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(contents, "second");
+        assert!(!temp_left);
+    }
+
+    #[test]
+    fn search_selection_wraps_within_matches() {
+        let mut app = test_app();
+        app.favorites = vec!["apple".into(), "banana".into(), "apricot".into()];
+        app.search_query = "ap".into();
+        assert_eq!(
+            app.select_initial_search_result(),
+            Some(SearchPane::Favorites)
+        );
+        assert_eq!(app.selected_favorite, Some(0));
+        assert!(app.move_search_selection(1));
+        assert_eq!(app.selected_favorite, Some(2));
+        assert!(app.move_search_selection(1));
+        assert_eq!(app.selected_favorite, Some(0));
+        assert!(app.move_search_selection(-1));
+        assert_eq!(app.selected_favorite, Some(2));
+    }
+
+    #[test]
+    fn switching_pane_skips_to_first_match() {
+        let mut app = test_app();
+        app.favorites = vec!["apple".into()];
+        app.icon_favorites = vec![IconFavorite {
+            path: r"C:\apps\tool.exe".into(),
+            label: "Apple Tool".into(),
+        }];
+        app.search_query = "apple".into();
+        app.select_initial_search_result();
+        assert!(app.switch_search_pane(SearchPane::Icons));
+        assert_eq!(app.selected_icon_favorite, Some(0));
+        assert_eq!(app.selected_favorite, None);
+        assert_eq!(app.icon_edit_label_input, "Apple Tool");
+        assert!(!app.switch_search_pane(SearchPane::Launcher));
+    }
 }
