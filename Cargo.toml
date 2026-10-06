@@ -6,7 +6,6 @@ edition = "2024"
 [features]
 default = []
 log-ui = []
-legacy-layout = []
 
 [dependencies]
 arboard = "3.6"
