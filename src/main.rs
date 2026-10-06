@@ -979,7 +979,10 @@ impl eframe::App for HandApp {
                             }
                         }
                     });
-                if ui.input(|input| input.key_pressed(egui::Key::Delete)) {
+                // テキスト入力中の Delete で履歴が消えないよう、入力欄にフォーカスが無いときだけ扱う。
+                if !ui.ctx().wants_keyboard_input()
+                    && ui.input(|input| input.key_pressed(egui::Key::Delete))
+                {
                     self.remove_selected_history();
                 }
             });
