@@ -1494,20 +1494,19 @@ fn open_path(path: &str) -> std::io::Result<()> {
     let target = Path::new(path);
     // .code-workspace は関連付け起動が成功扱いでも VS Code に渡らない環境がある。
     // VS Code 本体が見つかる場合は、ワークスペースを引数として直接起動する。
+    // cmd /C を経由するとパス中の & や % が解釈されるため、code.cmd を直接起動して
+    // Rust 標準のバッチ引数エスケープに任せる。
     if target
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("code-workspace"))
+        && let Some(code_cli) = vscode_cli()
     {
-        if let Some(code_cli) = vscode_cli() {
-            return Command::new("cmd")
-                .arg("/C")
-                .arg(code_cli)
-                .arg("--new-window")
-                .arg(target)
-                .creation_flags(CREATE_NO_WINDOW)
-                .spawn()
-                .map(|_| ());
-        }
+        return Command::new(code_cli)
+            .arg("--new-window")
+            .arg(target)
+            .creation_flags(CREATE_NO_WINDOW)
+            .spawn()
+            .map(|_| ());
     }
     open::that(path)
 }
