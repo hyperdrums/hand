@@ -6,7 +6,8 @@ use std::collections::VecDeque;
 use std::os::windows::process::CommandExt;
 use std::{
     collections::HashMap,
-    fs,
+    fs::{self, File},
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::Arc,
@@ -754,7 +755,8 @@ impl HandApp {
             launcher_sort: self.launcher_sort,
         };
         match serde_json::to_string_pretty(&state)
-            .and_then(|json| fs::write(&self.config_path, json).map_err(serde_json::Error::io))
+            .map_err(std::io::Error::other)
+            .and_then(|json| write_atomically(&self.config_path, json.as_bytes()))
         {
             Ok(()) => {}
             Err(error) => self.log(format!("設定の保存に失敗しました: {error}"), true),
@@ -1527,6 +1529,16 @@ fn vscode_cli() -> Option<PathBuf> {
         }
     }
     candidates.into_iter().find(|candidate| candidate.is_file())
+}
+
+fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
+    // 書き込み途中で落ちても元の設定が残るよう、一時ファイル経由で置き換える。
+    let temp_path = path.with_extension("json.tmp");
+    let mut file = File::create(&temp_path)?;
+    file.write_all(contents)?;
+    file.sync_all()?;
+    drop(file);
+    fs::rename(&temp_path, path)
 }
 
 fn config_path() -> PathBuf {
