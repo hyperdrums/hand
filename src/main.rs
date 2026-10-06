@@ -108,6 +108,7 @@ struct HandApp {
     icon_favorites: Vec<IconFavorite>,
     launcher_dirs: Vec<String>,
     launcher_files: Vec<LauncherFile>,
+    launcher_dir_unavailable: bool,
     launcher_recent: Vec<String>,
     launcher_sort: LauncherSort,
     favorite_input: String,
@@ -142,6 +143,7 @@ impl HandApp {
             icon_favorites: Vec::new(),
             launcher_dirs: Vec::new(),
             launcher_files: Vec::new(),
+            launcher_dir_unavailable: false,
             launcher_recent: Vec::new(),
             launcher_sort: LauncherSort::Name,
             favorite_input: String::new(),
@@ -572,6 +574,7 @@ impl HandApp {
     fn refresh_launcher_files(&mut self) {
         self.launcher_files.clear();
         self.selected_launcher_file = None;
+        self.launcher_dir_unavailable = false;
         let Some(index) = self.selected_launcher_dir else {
             return;
         };
@@ -579,6 +582,7 @@ impl HandApp {
             return;
         };
         if fs::read_dir(&directory).is_err() {
+            self.launcher_dir_unavailable = true;
             self.log(
                 format!("ランチャーDIRを読み込めませんでした: {directory}"),
                 true,
@@ -693,10 +697,11 @@ impl HandApp {
                         .into_iter()
                         .filter(|favorite| !favorite.path.trim().is_empty())
                         .collect();
+                    // 未接続のドライブ等を設定から消さないよう、存在確認は表示時に行う。
                     self.launcher_dirs = state
                         .launcher_dirs
                         .into_iter()
-                        .filter(|path| Path::new(path).is_dir())
+                        .filter(|path| !path.trim().is_empty())
                         .collect();
                     self.launcher_recent = state.launcher_recent;
                     self.launcher_sort = state.launcher_sort;
@@ -1103,6 +1108,12 @@ impl eframe::App for HandApp {
                 });
                 if selected_dir_changed {
                     self.refresh_launcher_files();
+                }
+                if self.launcher_dir_unavailable {
+                    icons_ui.colored_label(
+                        Color32::from_rgb(190, 40, 40),
+                        "フォルダにアクセスできません(未接続の可能性があります)",
+                    );
                 }
                 let launcher_height = (icons_ui.available_height() * 0.48).max(110.0);
                 ScrollArea::vertical()
