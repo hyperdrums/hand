@@ -1642,7 +1642,10 @@ mod tests {
     use super::*;
 
     fn test_app() -> HandApp {
-        HandApp::empty(egui::Context::default(), PathBuf::from("unused.json"))
+        let mut app = HandApp::empty(egui::Context::default(), PathBuf::from("unused.json"));
+        // テストから設定ファイルを書き出さないよう保存を止める。
+        app.save_blocked = true;
+        app
     }
 
     fn temp_dir(name: &str) -> PathBuf {
