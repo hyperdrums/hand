@@ -2,6 +2,7 @@
 name = "hand"
 version = "0.2.23"
 edition = "2024"
+rust-version = "1.97"
 
 [features]
 default = []

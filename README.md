@@ -17,13 +17,14 @@ Rust 1.97 以降をインストールした Windows 環境で実行します。
 cargo build --release
 ```
 
-実行ファイルは `target\\release\\hand.exe` に生成されます。
+実行ファイルは `target\release\hand.exe` に生成されます。
 
 ## 開発用コマンド
 
 ```powershell
 cargo fmt
-cargo check
+cargo clippy
+cargo test
 ```
 
 ログ UI は標準ビルドでは含まれません。必要な場合だけ次のように有効化します。
