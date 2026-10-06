@@ -1023,17 +1023,20 @@ impl eframe::App for HandApp {
                 });
                 if !self.log_collapsed {
                     ui.separator();
-                    ScrollArea::vertical().stick_to_bottom(true).show(ui, |ui| {
-                        for (is_error, message) in &self.logs {
-                            let color = if *is_error {
-                                Color32::RED
-                            } else {
-                                ui.visuals().text_color()
-                            };
-                            let prefix = if *is_error { "[ERROR]" } else { "[INFO ]" };
-                            ui.label(RichText::new(format!("{prefix} {message}")).color(color));
-                        }
-                    });
+                    ScrollArea::vertical()
+                        .id_salt("log_list")
+                        .stick_to_bottom(true)
+                        .show(ui, |ui| {
+                            for (is_error, message) in &self.logs {
+                                let color = if *is_error {
+                                    Color32::RED
+                                } else {
+                                    ui.visuals().text_color()
+                                };
+                                let prefix = if *is_error { "[ERROR]" } else { "[INFO ]" };
+                                ui.label(RichText::new(format!("{prefix} {message}")).color(color));
+                            }
+                        });
                 }
             });
 
@@ -1051,6 +1054,7 @@ impl eframe::App for HandApp {
                 });
                 ui.separator();
                 ScrollArea::vertical()
+                    .id_salt("history_list")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
                         for index in 0..self.history.len() {
@@ -1108,6 +1112,7 @@ impl eframe::App for HandApp {
                 });
                 favorites_ui.separator();
                 ScrollArea::vertical()
+                    .id_salt("favorites_list")
                     .auto_shrink([false, false])
                     .show(favorites_ui, |ui| {
                         for index in 0..self.favorites.len() {
@@ -1299,7 +1304,10 @@ impl eframe::App for HandApp {
                     }
                 });
                 icons_ui.separator();
+                // 同じ列にランチャー一覧もあるため、ID を分けないと行ボタンの ID が衝突して
+                // 後から描画されるこちらがランチャー側のホバーやクリックを奪ってしまう。
                 ScrollArea::vertical()
+                    .id_salt("icon_favorites_list")
                     .auto_shrink([false, false])
                     .show(icons_ui, |ui| {
                         for index in 0..self.icon_favorites.len() {
@@ -1745,6 +1753,81 @@ mod tests {
         assert_eq!(app.selected_favorite, Some(0));
         assert!(app.move_search_selection(-1));
         assert_eq!(app.selected_favorite, Some(2));
+    }
+
+    /// 画面上を縦にクリックしていき、反応したランチャー行とアイコン行を集める。
+    fn click_rows_in_right_column(app: &mut HandApp) -> (Vec<usize>, Vec<usize>) {
+        let ctx = app.ctx.clone();
+        let run_frame = |app: &mut HandApp, events: Vec<egui::Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1120.0, 760.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut frame = eframe::Frame::_new_kittest();
+            let _ = ctx.run(input, |ctx| eframe::App::update(app, ctx, &mut frame));
+        };
+        // Windows の表示スケール 150% 相当で検証する。
+        ctx.set_pixels_per_point(1.5);
+        for _ in 0..3 {
+            run_frame(app, Vec::new());
+        }
+        let mut launcher_hits = Vec::new();
+        let mut icon_hits = Vec::new();
+        // ツールバーの「更新」などを押さないよう、一覧の領域から開始する。
+        for y in (90..740).step_by(8) {
+            let pos = egui::pos2(930.0, y as f32);
+            let click = |pressed| egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            app.selected_launcher_file = None;
+            app.selected_icon_favorite = None;
+            run_frame(app, vec![egui::Event::PointerMoved(pos)]);
+            run_frame(app, vec![click(true)]);
+            run_frame(app, vec![click(false)]);
+            launcher_hits.extend(app.selected_launcher_file);
+            icon_hits.extend(app.selected_icon_favorite);
+        }
+        launcher_hits.dedup();
+        icon_hits.dedup();
+        (launcher_hits, icon_hits)
+    }
+
+    #[test]
+    fn launcher_and_icon_rows_are_clickable() {
+        // 実在ファイルにしてアイコン付きの行で検証する(アイコンが無いと ID 衝突が再現しない)。
+        let dir = temp_dir("clickable");
+        let mut app = test_app();
+        app.launcher_files = (0..13)
+            .map(|i| {
+                let path = dir.join(format!("launcher{i}.txt"));
+                fs::write(&path, "").unwrap();
+                LauncherFile {
+                    path: path.to_string_lossy().into_owned(),
+                    label: format!("launcher{i}.txt"),
+                }
+            })
+            .collect();
+        app.icon_favorites = (0..10)
+            .map(|i| {
+                let path = dir.join(format!("icon{i}.txt"));
+                fs::write(&path, "").unwrap();
+                IconFavorite {
+                    path: path.to_string_lossy().into_owned(),
+                    label: format!("icon{i}"),
+                }
+            })
+            .collect();
+        let (launcher_hits, icon_hits) = click_rows_in_right_column(&mut app);
+        fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(launcher_hits, (0..13).collect::<Vec<_>>());
+        assert_eq!(icon_hits, (0..10).collect::<Vec<_>>());
     }
 
     #[test]
