@@ -130,6 +130,7 @@ struct HandApp {
     #[cfg(feature = "log-ui")]
     log_collapsed: bool,
     last_clipboard_text: String,
+    last_clipboard_files: Vec<String>,
     last_poll: Instant,
     config_path: PathBuf,
     save_blocked: bool,
@@ -165,6 +166,7 @@ impl HandApp {
             #[cfg(feature = "log-ui")]
             log_collapsed: false,
             last_clipboard_text: String::new(),
+            last_clipboard_files: Vec::new(),
             last_poll: Instant::now(),
             config_path,
             save_blocked: false,
@@ -349,9 +351,14 @@ impl HandApp {
         let files = clipboard_files();
         if !files.is_empty() {
             self.last_clipboard_text.clear();
-            self.add_history_items(files, "ファイルコピーを検出しました");
+            // 同じファイルがクリップボードに残っている間は、削除した履歴を再追加しない。
+            if files != self.last_clipboard_files {
+                self.last_clipboard_files = files.clone();
+                self.add_history_items(files, "ファイルコピーを検出しました");
+            }
             return;
         }
+        self.last_clipboard_files.clear();
 
         let Ok(mut clipboard) = Clipboard::new() else {
             return;
