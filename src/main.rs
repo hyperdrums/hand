@@ -1502,10 +1502,21 @@ fn config_path() -> PathBuf {
 }
 
 fn configure_japanese_font(ctx: &egui::Context) {
-    // eframe の標準フォントには日本語グリフがないため、Windows 標準の
-    // Noto Sans JP を最優先のフォールバックとして登録する。
-    let font_path = PathBuf::from(r"C:\Windows\Fonts\NotoSansJP-VF.ttf");
-    let Ok(font_bytes) = fs::read(font_path) else {
+    // eframe の標準フォントには日本語グリフがないため、Windows 同梱の日本語フォントを
+    // 最優先のフォールバックとして登録する。Noto Sans JP は環境によって入っていないため、
+    // 游ゴシック・メイリオ・MS ゴシックの順に探す。
+    let fonts_dir = std::env::var_os("WINDIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(r"C:\Windows"))
+        .join("Fonts");
+    let Some(font_bytes) = [
+        "NotoSansJP-VF.ttf",
+        "YuGothM.ttc",
+        "meiryo.ttc",
+        "msgothic.ttc",
+    ]
+    .iter()
+    .find_map(|name| fs::read(fonts_dir.join(name)).ok()) else {
         return;
     };
 
