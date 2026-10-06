@@ -1373,7 +1373,7 @@ dependencies = [
 
 [[package]]
 name = "hand"
-version = "0.1.0"
+version = "0.2.23"
 dependencies = [
  "arboard",
  "eframe",

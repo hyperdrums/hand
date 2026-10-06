@@ -33,7 +33,7 @@ use windows_sys::Win32::{
 const MAX_HISTORY: usize = 100;
 const POLL_INTERVAL: Duration = Duration::from_millis(1500);
 const CF_HDROP: u32 = 15;
-const APP_VERSION: &str = "0.2.23";
+const APP_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const MAX_LAUNCHER_RECENTS: usize = 200;
 const MAX_LAUNCHER_DEPTH: usize = 8;
