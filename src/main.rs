@@ -130,6 +130,7 @@ struct HandApp {
     last_clipboard_text: String,
     last_poll: Instant,
     config_path: PathBuf,
+    save_blocked: bool,
 }
 
 impl HandApp {
@@ -163,6 +164,7 @@ impl HandApp {
             last_clipboard_text: String::new(),
             last_poll: Instant::now(),
             config_path,
+            save_blocked: false,
         };
         app.load_state();
         app.refresh_launcher_files();
@@ -706,14 +708,39 @@ impl HandApp {
                         false,
                     );
                 }
-                Err(error) => self.log(format!("設定の読み込みに失敗しました: {error}"), true),
+                Err(error) => {
+                    self.log(format!("設定の読み込みに失敗しました: {error}"), true);
+                    // 壊れた設定を空の状態で上書きしないよう、先に退避する。
+                    let backup_path = self.config_path.with_extension("json.bak");
+                    match fs::copy(&self.config_path, &backup_path) {
+                        Ok(_) => self.log(
+                            format!("壊れた設定を退避しました: {}", backup_path.display()),
+                            true,
+                        ),
+                        Err(error) => {
+                            self.save_blocked = true;
+                            self.log(
+                                format!("設定を退避できないため保存を停止します: {error}"),
+                                true,
+                            );
+                        }
+                    }
+                }
             },
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => self.save_state(),
-            Err(error) => self.log(format!("設定の読み込みに失敗しました: {error}"), true),
+            Err(error) => {
+                // 読めないだけで中身は無事な可能性があるため、上書きしない。
+                self.save_blocked = true;
+                self.log(format!("設定の読み込みに失敗しました: {error}"), true);
+            }
         }
     }
 
     fn save_state(&mut self) {
+        if self.save_blocked {
+            self.log("設定の読み込みに失敗したため保存をスキップしました", true);
+            return;
+        }
         let state = SavedState {
             favorites: self.favorites.clone(),
             icon_favorites: self.icon_favorites.clone(),
