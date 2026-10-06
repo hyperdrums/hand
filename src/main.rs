@@ -40,6 +40,8 @@ const MAX_LAUNCHER_DEPTH: usize = 8;
 const MAX_LAUNCHER_FILES: usize = 5000;
 const MAX_ICON_LOADS_PER_FRAME: usize = 16;
 const LIST_ROW_HEIGHT: f32 = 24.0;
+const HISTORY_PREVIEW_CHARS: usize = 80;
+const HISTORY_TOOLTIP_CHARS: usize = 2000;
 
 #[derive(Default, Serialize, Deserialize)]
 struct SavedState {
@@ -1042,11 +1044,14 @@ impl eframe::App for HandApp {
                             if !self.matches_search(item) {
                                 continue;
                             }
-                            let response = ui.add(
-                                egui::Button::new(item)
-                                    .min_size(egui::vec2(ui.available_width(), 24.0))
-                                    .selected(self.selected_history == Some(index)),
-                            );
+                            // 長文や複数行のテキストで行が肥大化しないよう、表示は先頭行だけに絞る。
+                            let response = ui
+                                .add(
+                                    egui::Button::new(history_preview(item))
+                                        .min_size(egui::vec2(ui.available_width(), LIST_ROW_HEIGHT))
+                                        .selected(self.selected_history == Some(index)),
+                                )
+                                .on_hover_text(truncate_chars(item, HISTORY_TOOLTIP_CHARS));
                             if response.clicked() {
                                 self.selected_history = Some(index);
                             }
@@ -1405,6 +1410,24 @@ fn collect_launcher_files(directory: &Path, depth: usize, files: &mut Vec<Launch
         }
     }
     truncated
+}
+
+fn history_preview(text: &str) -> String {
+    let mut lines = text.trim().lines();
+    let first_line = lines.next().unwrap_or_default();
+    let preview = truncate_chars(first_line, HISTORY_PREVIEW_CHARS);
+    if lines.next().is_some() && !preview.ends_with('…') {
+        format!("{preview} …")
+    } else {
+        preview
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    match text.char_indices().nth(max_chars) {
+        Some((byte_index, _)) => format!("{}…", &text[..byte_index]),
+        None => text.to_owned(),
+    }
 }
 
 fn default_icon_label(path: &str) -> String {
