@@ -194,6 +194,7 @@ impl HandApp {
             config_path,
             save_blocked: false,
         };
+        app.migrate_legacy_config();
         app.load_state();
         app.refresh_launcher_files();
         app
@@ -757,6 +758,34 @@ impl HandApp {
         let id = texture.as_ref().map(egui::TextureHandle::id);
         cache.insert(path.to_owned(), texture);
         id
+    }
+
+    fn migrate_legacy_config(&mut self) {
+        let legacy_path = legacy_config_path();
+        if legacy_path == self.config_path || self.config_path.exists() || !legacy_path.is_file() {
+            return;
+        }
+        // 旧ファイルは残したままコピーし、問題があれば手動で戻せるようにする。
+        let result = self
+            .config_path
+            .parent()
+            .map_or(Ok(()), fs::create_dir_all)
+            .and_then(|()| fs::copy(&legacy_path, &self.config_path).map(|_| ()));
+        match result {
+            Ok(()) => self.log(
+                format!(
+                    "旧設定を移行しました: {} -> {}",
+                    legacy_path.display(),
+                    self.config_path.display()
+                ),
+                false,
+            ),
+            Err(error) => {
+                // 移行できなければ旧ファイルをそのまま使い続ける。
+                self.log(format!("旧設定の移行に失敗しました: {error}"), true);
+                self.config_path = legacy_path;
+            }
+        }
     }
 
     fn load_state(&mut self) {
@@ -1486,6 +1515,9 @@ fn vscode_cli() -> Option<PathBuf> {
 
 fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
     // 書き込み途中で落ちても元の設定が残るよう、一時ファイル経由で置き換える。
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
     let temp_path = path.with_extension("json.tmp");
     let mut file = File::create(&temp_path)?;
     file.write_all(contents)?;
@@ -1495,6 +1527,14 @@ fn write_atomically(path: &Path, contents: &[u8]) -> std::io::Result<()> {
 }
 
 fn config_path() -> PathBuf {
+    match std::env::var_os("APPDATA") {
+        Some(app_data) => PathBuf::from(app_data).join("hand").join("config.json"),
+        None => legacy_config_path(),
+    }
+}
+
+/// Python 版から引き継いだ旧設定ファイルの場所。
+fn legacy_config_path() -> PathBuf {
     std::env::var_os("USERPROFILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."))
