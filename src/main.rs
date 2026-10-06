@@ -41,6 +41,8 @@ const MAX_LAUNCHER_FILES: usize = 5000;
 const MAX_ICON_LOADS_PER_FRAME: usize = 16;
 const LIST_ROW_HEIGHT: f32 = 24.0;
 const HISTORY_PREVIEW_CHARS: usize = 80;
+const SEARCH_HIGHLIGHT_FILL: Color32 = Color32::from_rgb(255, 196, 110);
+const SEARCH_HIGHLIGHT_STROKE: Color32 = Color32::from_rgb(190, 105, 20);
 const HISTORY_TOOLTIP_CHARS: usize = 2000;
 
 #[derive(Default, Serialize, Deserialize)]
@@ -336,6 +338,42 @@ impl HandApp {
             Some(SearchPane::Icons)
         } else {
             self.select_search_result(self.search_pane, None);
+            None
+        }
+    }
+
+    /// 検索欄にフォーカスがあるときのキー操作を処理し、スクロールすべきペインを返す。
+    fn handle_search_keys(&mut self, ctx: &egui::Context) -> Option<SearchPane> {
+        let pressed = |key| ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, key));
+        if pressed(egui::Key::Escape) {
+            self.search_query.clear();
+            self.selected_favorite = None;
+            self.selected_launcher_file = None;
+            self.selected_icon_favorite = None;
+            self.search_result_highlight = false;
+            None
+        } else if pressed(egui::Key::ArrowDown) {
+            self.move_search_selection(1).then_some(self.search_pane)
+        } else if pressed(egui::Key::ArrowUp) {
+            self.move_search_selection(-1).then_some(self.search_pane)
+        } else if pressed(egui::Key::ArrowLeft) {
+            let next_pane = match self.search_pane {
+                SearchPane::Favorites => SearchPane::Icons,
+                SearchPane::Launcher => SearchPane::Favorites,
+                SearchPane::Icons => SearchPane::Launcher,
+            };
+            self.switch_search_pane(next_pane).then_some(next_pane)
+        } else if pressed(egui::Key::ArrowRight) {
+            let next_pane = match self.search_pane {
+                SearchPane::Favorites => SearchPane::Launcher,
+                SearchPane::Launcher => SearchPane::Icons,
+                SearchPane::Icons => SearchPane::Favorites,
+            };
+            self.switch_search_pane(next_pane).then_some(next_pane)
+        } else {
+            if pressed(egui::Key::Enter) {
+                self.open_search_selection();
+            }
             None
         }
     }
@@ -878,64 +916,12 @@ impl eframe::App for HandApp {
         let focus_search =
             ctx.input(|input| input.modifiers.ctrl && input.key_pressed(egui::Key::F));
         let search_has_focus = focus_search || ctx.memory(|memory| memory.has_focus(search_id));
-        let mut scroll_to_favorite = false;
-        let mut scroll_to_launcher = false;
-        let mut scroll_to_icons = false;
+        let mut scroll_target = if search_has_focus {
+            self.handle_search_keys(ctx)
+        } else {
+            None
+        };
         let mut search_changed = false;
-
-        if search_has_focus {
-            if ctx.input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
-                self.search_query.clear();
-                self.selected_favorite = None;
-                self.selected_launcher_file = None;
-                self.selected_icon_favorite = None;
-                self.search_result_highlight = false;
-            } else if ctx
-                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown))
-            {
-                if self.move_search_selection(1) {
-                    scroll_to_favorite = self.search_pane == SearchPane::Favorites;
-                    scroll_to_launcher = self.search_pane == SearchPane::Launcher;
-                    scroll_to_icons = self.search_pane == SearchPane::Icons;
-                }
-            } else if ctx
-                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp))
-            {
-                if self.move_search_selection(-1) {
-                    scroll_to_favorite = self.search_pane == SearchPane::Favorites;
-                    scroll_to_launcher = self.search_pane == SearchPane::Launcher;
-                    scroll_to_icons = self.search_pane == SearchPane::Icons;
-                }
-            } else if ctx
-                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft))
-            {
-                let next_pane = match self.search_pane {
-                    SearchPane::Favorites => SearchPane::Icons,
-                    SearchPane::Launcher => SearchPane::Favorites,
-                    SearchPane::Icons => SearchPane::Launcher,
-                };
-                let has_selection = self.switch_search_pane(next_pane);
-                scroll_to_favorite = has_selection && next_pane == SearchPane::Favorites;
-                scroll_to_launcher = has_selection && next_pane == SearchPane::Launcher;
-                scroll_to_icons = has_selection && next_pane == SearchPane::Icons;
-            } else if ctx
-                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight))
-            {
-                let next_pane = match self.search_pane {
-                    SearchPane::Favorites => SearchPane::Launcher,
-                    SearchPane::Launcher => SearchPane::Icons,
-                    SearchPane::Icons => SearchPane::Favorites,
-                };
-                let has_selection = self.switch_search_pane(next_pane);
-                scroll_to_favorite = has_selection && next_pane == SearchPane::Favorites;
-                scroll_to_launcher = has_selection && next_pane == SearchPane::Launcher;
-                scroll_to_icons = has_selection && next_pane == SearchPane::Icons;
-            } else if ctx
-                .input_mut(|input| input.consume_key(egui::Modifiers::NONE, egui::Key::Enter))
-            {
-                self.open_search_selection();
-            }
-        }
 
         egui::TopBottomPanel::top("toolbar")
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(14, 10)))
@@ -1010,12 +996,7 @@ impl eframe::App for HandApp {
             if self.search_query.trim().is_empty() {
                 self.search_result_highlight = false;
             } else {
-                match self.select_initial_search_result() {
-                    Some(SearchPane::Favorites) => scroll_to_favorite = true,
-                    Some(SearchPane::Launcher) => scroll_to_launcher = true,
-                    Some(SearchPane::Icons) => scroll_to_icons = true,
-                    None => {}
-                }
+                scroll_target = self.select_initial_search_result();
             }
         }
 
@@ -1135,13 +1116,11 @@ impl eframe::App for HandApp {
                                 && self.selected_favorite == Some(index);
                             let button = egui::Button::new(path)
                                 .min_size(egui::vec2(ui.available_width(), 24.0));
-                            let button = if is_search_highlight {
-                                button.fill(Color32::from_rgb(255, 196, 110)).stroke(
-                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(190, 105, 20)),
-                                )
-                            } else {
-                                button.selected(self.selected_favorite == Some(index))
-                            };
+                            let button = list_button_style(
+                                button,
+                                is_search_highlight,
+                                self.selected_favorite == Some(index),
+                            );
                             let response = ui.add(button);
                             if response.clicked() {
                                 self.selected_favorite = Some(index);
@@ -1154,7 +1133,9 @@ impl eframe::App for HandApp {
                                 self.selected_favorite = Some(index);
                                 self.open_selected_favorite();
                             }
-                            if scroll_to_favorite && self.selected_favorite == Some(index) {
+                            if scroll_target == Some(SearchPane::Favorites)
+                                && self.selected_favorite == Some(index)
+                            {
                                 response.scroll_to_me(Some(egui::Align::Center));
                             }
                         }
@@ -1240,7 +1221,7 @@ impl eframe::App for HandApp {
                     .id_salt("launcher_files")
                     .max_height(launcher_height);
                 // show_rows では画面外の行が描画されず scroll_to_me が使えないため、位置を計算して寄せる。
-                if scroll_to_launcher
+                if scroll_target == Some(SearchPane::Launcher)
                     && let Some(position) = self.selected_launcher_file.and_then(|selected| {
                         launcher_matches.iter().position(|index| *index == selected)
                     })
@@ -1269,13 +1250,11 @@ impl eframe::App for HandApp {
                             let is_search_highlight = self.search_result_highlight
                                 && self.search_pane == SearchPane::Launcher
                                 && self.selected_launcher_file == Some(index);
-                            let button = if is_search_highlight {
-                                button.fill(Color32::from_rgb(255, 196, 110)).stroke(
-                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(190, 105, 20)),
-                                )
-                            } else {
-                                button.selected(self.selected_launcher_file == Some(index))
-                            };
+                            let button = list_button_style(
+                                button,
+                                is_search_highlight,
+                                self.selected_launcher_file == Some(index),
+                            );
                             let response = ui
                                 .add_sized([ui.available_width(), LIST_ROW_HEIGHT], button)
                                 .on_hover_text(&file.path);
@@ -1336,13 +1315,11 @@ impl eframe::App for HandApp {
                             let is_search_highlight = self.search_result_highlight
                                 && self.search_pane == SearchPane::Icons
                                 && self.selected_icon_favorite == Some(index);
-                            let button = if is_search_highlight {
-                                button.fill(Color32::from_rgb(255, 196, 110)).stroke(
-                                    egui::Stroke::new(1.0_f32, Color32::from_rgb(190, 105, 20)),
-                                )
-                            } else {
-                                button.selected(self.selected_icon_favorite == Some(index))
-                            };
+                            let button = list_button_style(
+                                button,
+                                is_search_highlight,
+                                self.selected_icon_favorite == Some(index),
+                            );
                             let response = ui
                                 .add_sized([ui.available_width(), 24.0], button)
                                 .on_hover_text(&favorite.path);
@@ -1357,7 +1334,9 @@ impl eframe::App for HandApp {
                                 self.select_icon_favorite(index);
                                 self.open_selected_icon_favorite();
                             }
-                            if scroll_to_icons && self.selected_icon_favorite == Some(index) {
+                            if scroll_target == Some(SearchPane::Icons)
+                                && self.selected_icon_favorite == Some(index)
+                            {
                                 response.scroll_to_me(Some(egui::Align::Center));
                             }
                         }
@@ -1439,6 +1418,21 @@ fn collect_launcher_files(directory: &Path, depth: usize, files: &mut Vec<Launch
         }
     }
     truncated
+}
+
+/// 検索で選ばれた行はオレンジで強調し、それ以外は通常の選択表示にする。
+fn list_button_style(
+    button: egui::Button<'_>,
+    is_search_highlight: bool,
+    is_selected: bool,
+) -> egui::Button<'_> {
+    if is_search_highlight {
+        button
+            .fill(SEARCH_HIGHLIGHT_FILL)
+            .stroke(egui::Stroke::new(1.0_f32, SEARCH_HIGHLIGHT_STROKE))
+    } else {
+        button.selected(is_selected)
+    }
 }
 
 fn history_preview(text: &str) -> String {
