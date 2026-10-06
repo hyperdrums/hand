@@ -389,8 +389,8 @@ impl HandApp {
         let Ok(text) = clipboard.get_text() else {
             return;
         };
-        let text = text.trim().to_owned();
-        if text.is_empty() {
+        // 再コピー時に前後の改行や空白が失われないよう、原文のまま保持する。
+        if text.trim().is_empty() {
             self.last_clipboard_text.clear();
         } else if text != self.last_clipboard_text {
             self.last_clipboard_text = text.clone();
